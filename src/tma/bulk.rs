@@ -15,12 +15,14 @@ use core::arch::nvptx as nv;
 use core::ffi::c_void;
 
 #[allow(unused_imports)]
-use super::{CachePolicy, CtaMask};
+use super::CtaMask;
 #[cfg(target_feature = "sm_90")]
 #[allow(unused_imports)]
 use super::{bulk_commit_group, bulk_wait_group};
 #[allow(unused_imports)]
 use crate::mbarrier::MBarrier;
+#[allow(unused_imports)]
+use crate::memory::CachePolicy;
 
 /// Asynchronously copies `size` bytes from global memory at `src` to shared memory of the
 /// executing CTA at `dst`, and performs a complete-transaction of `size` bytes on `mbar`

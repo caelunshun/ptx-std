@@ -87,30 +87,6 @@ pub(crate) const BLACKWELL_TMA: bool = cfg!(any(
     target_feature = "sm_110f"
 ));
 
-/// An L2 cache eviction policy, used as a hint by TMA operations.
-///
-/// A policy is a 64-bit opaque value produced by the `createpolicy` PTX instruction. Passing
-/// `None` instead of a policy to an operation omits the `.L2::cache_hint` qualifier.
-///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#cache-eviction-priority-hints>
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Pod, Zeroable)]
-#[repr(transparent)]
-pub struct CachePolicy(u64);
-
-impl CachePolicy {
-    /// Wraps the raw policy value produced by `createpolicy`.
-    #[inline]
-    pub const fn from_bits(bits: u64) -> Self {
-        Self(bits)
-    }
-
-    /// Returns the raw policy value.
-    #[inline]
-    pub const fn to_bits(self) -> u64 {
-        self.0
-    }
-}
-
 /// A set of CTAs within the executing cluster, identified by their rank in the cluster
 /// (`%cluster_ctarank`). Bit `i` of the mask selects the CTA of rank `i`.
 ///

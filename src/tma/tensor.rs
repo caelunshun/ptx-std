@@ -45,12 +45,14 @@ use core::ffi::c_void;
 use core::marker::ConstParamTy;
 
 #[allow(unused_imports)]
-use super::{BLACKWELL_TMA, CachePolicy, CtaMask, TmaDescriptor};
+use super::{BLACKWELL_TMA, CtaMask, TmaDescriptor};
 #[cfg(target_feature = "sm_90")]
 #[allow(unused_imports)]
 use super::{bulk_commit_group, bulk_wait_group};
 #[allow(unused_imports)]
 use crate::mbarrier::MBarrier;
+#[allow(unused_imports)]
+use crate::memory::CachePolicy;
 #[allow(unused_imports)]
 use crate::modifiers::CtaGroup;
 

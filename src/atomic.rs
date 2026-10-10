@@ -65,8 +65,8 @@ use crate::MBarrier;
 use crate::memory::{AsyncStoreTarget, assert_async_store_supported};
 use crate::{
     bf16, bf16x2, f16, f16x2,
+    memory::CachePolicy,
     modifiers::{MemoryOrdering, Scope},
-    tma::CachePolicy,
 };
 use sealed::Op;
 

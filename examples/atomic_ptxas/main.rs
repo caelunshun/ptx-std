@@ -10,7 +10,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use ptx_std::{
-    MemoryOrdering as M, Scope as S, atomic::*, bf16, bf16x2, f16, f16x2, tma::CachePolicy,
+    MemoryOrdering as M, Scope as S, atomic::*, bf16, bf16x2, f16, f16x2, memory::CachePolicy,
 };
 
 /// Expands `$cb!(x y ...)` for every element of the cartesian product of the given lists.

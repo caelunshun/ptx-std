@@ -1,8 +1,11 @@
 // --- LLM-generated --- //
 //! Various memory operations like prefetching, L2 discard, cache priorities, ...
 
+use core::arch::asm;
 use core::arch::nvptx as nv;
 use core::marker::ConstParamTy;
+
+use bytemuck::{Pod, Zeroable};
 
 #[cfg(target_feature = "sm_100")]
 use crate::modifiers::Scope;
@@ -26,6 +29,8 @@ pub enum CacheLevel {
 
 /// The eviction priority applied to cache lines in the L2 cache
 /// (`.level::eviction_priority`).
+///
+/// Not every operation supports every priority; see the documentation of each operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum L2EvictionPriority {
     /// Evict the cache line normally (`.L2::evict_normal`).
@@ -33,6 +38,202 @@ pub enum L2EvictionPriority {
     /// Evict the cache line last, i.e. keep it resident as long as possible
     /// (`.L2::evict_last`).
     Last,
+    /// Evict the cache line first, i.e. it is likely to be accessed only once
+    /// (`.L2::evict_first`).
+    First,
+    /// Do not change the eviction priority of the cache line (`.L2::evict_unchanged`).
+    Unchanged,
+}
+
+/// An L2 cache eviction policy, used as a hint by memory operations with the
+/// `.L2::cache_hint` qualifier (TMA copies, atomics, ...).
+///
+/// A policy is a 64-bit opaque value produced by the `createpolicy` PTX instruction; see
+/// [`CachePolicy::fractional`], [`CachePolicy::range`] and
+/// [`CachePolicy::from_access_property`]. Passing `None` instead of a policy to an operation
+/// omits the `.L2::cache_hint` qualifier.
+///
+/// The policy is only a performance hint and does not affect the memory model.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#cache-eviction-priority-hints>
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Pod, Zeroable)]
+#[repr(transparent)]
+pub struct CachePolicy(u64);
+
+const fn assert_secondary_priority_supported(secondary: L2EvictionPriority) {
+    assert!(
+        matches!(
+            secondary,
+            L2EvictionPriority::First | L2EvictionPriority::Unchanged
+        ),
+        "the secondary priority of a cache policy must be First or Unchanged"
+    );
+}
+
+macro_rules! create_policy {
+    ($primary:ident, $secondary:ident; $emit:ident) => {
+        asm_variants!($emit;
+            $primary => {
+                L2EvictionPriority::Normal => ".L2::evict_normal",
+                L2EvictionPriority::Last => ".L2::evict_last",
+                L2EvictionPriority::First => ".L2::evict_first",
+                L2EvictionPriority::Unchanged => ".L2::evict_unchanged",
+            },
+            $secondary => {
+                L2EvictionPriority::First => ".L2::evict_first",
+                L2EvictionPriority::Unchanged => ".L2::evict_unchanged",
+            },
+        )
+    };
+}
+
+impl CachePolicy {
+    /// Wraps the raw policy value produced by `createpolicy`.
+    #[inline]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Returns the raw policy value.
+    #[inline]
+    pub const fn to_bits(self) -> u64 {
+        self.0
+    }
+
+    /// Creates a policy that applies the eviction priority `PRIORITY` to all cache accesses
+    /// (`createpolicy.fractional` with the default fraction of 1.0).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-createpolicy>
+    #[inline]
+    pub fn new<const PRIORITY: L2EvictionPriority>() -> Self {
+        let policy: u64;
+        macro_rules! emit {
+            ($primary:literal, $secondary:literal) => {
+                // SAFETY: `createpolicy` only writes a register.
+                unsafe {
+                    asm!(
+                        concat!("createpolicy.fractional", $primary, $secondary, ".b64 {p};"),
+                        p = out(reg64) policy,
+                        options(pure, nomem, nostack),
+                    )
+                }
+            };
+        }
+        const SECONDARY: L2EvictionPriority = L2EvictionPriority::Unchanged;
+        create_policy!(PRIORITY, SECONDARY; emit);
+        Self(policy)
+    }
+
+    /// Creates a fraction-based policy (`createpolicy.fractional`): a memory access using the
+    /// policy gets the eviction priority `PRIMARY` with probability `fraction`, and the eviction
+    /// priority `SECONDARY` otherwise.
+    ///
+    /// `SECONDARY` must be [`L2EvictionPriority::First`] or [`L2EvictionPriority::Unchanged`].
+    ///
+    /// # Safety
+    ///
+    /// `fraction` must be in the range `(0.0, 1.0]`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-createpolicy>
+    #[inline]
+    pub unsafe fn fractional<
+        const PRIMARY: L2EvictionPriority,
+        const SECONDARY: L2EvictionPriority,
+    >(
+        fraction: f32,
+    ) -> Self {
+        const { assert_secondary_priority_supported(SECONDARY) };
+        let policy: u64;
+        macro_rules! emit {
+            ($primary:literal, $secondary:literal) => {
+                unsafe {
+                    asm!(
+                        concat!("createpolicy.fractional", $primary, $secondary, ".b64 {p}, {f};"),
+                        p = out(reg64) policy,
+                        f = in(reg32) fraction,
+                        options(pure, nomem, nostack),
+                    )
+                }
+            };
+        }
+        create_policy!(PRIMARY, SECONDARY; emit);
+        Self(policy)
+    }
+
+    /// Creates a range-based policy (`createpolicy.range`) for the address range around `base`:
+    ///
+    /// - The eviction priority `PRIMARY` applies to the primary range
+    ///   `[base, base + primary_size)`.
+    /// - The eviction priority `SECONDARY` applies to the trailing secondary range
+    ///   `[base + primary_size, base + total_size)` and to the preceding secondary range
+    ///   `[base - (total_size - primary_size), base)`.
+    /// - The eviction priority applied to addresses outside of these ranges is unspecified.
+    ///
+    /// Sizes are in bytes. `SECONDARY` must be [`L2EvictionPriority::First`] or
+    /// [`L2EvictionPriority::Unchanged`].
+    ///
+    /// # Safety
+    ///
+    /// - `base` must be a generic address within the window of the global state space (see
+    ///   [`is_in_address_space`]). It does not need to be valid for reads or writes.
+    /// - `primary_size` must be less than or equal to `total_size`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-createpolicy>
+    #[inline]
+    pub unsafe fn range<
+        const PRIMARY: L2EvictionPriority,
+        const SECONDARY: L2EvictionPriority,
+        T,
+    >(
+        base: *const T,
+        primary_size: u32,
+        total_size: u32,
+    ) -> Self {
+        const { assert_secondary_priority_supported(SECONDARY) };
+        let policy: u64;
+        macro_rules! emit {
+            ($primary:literal, $secondary:literal) => {
+                unsafe {
+                    asm!(
+                        concat!(
+                            "createpolicy.range", $primary, $secondary,
+                            ".b64 {p}, [{a}], {primary}, {total};"
+                        ),
+                        p = out(reg64) policy,
+                        a = in(reg64) base.expose_provenance(),
+                        primary = in(reg32) primary_size,
+                        total = in(reg32) total_size,
+                        options(pure, nomem, nostack),
+                    )
+                }
+            };
+        }
+        create_policy!(PRIMARY, SECONDARY; emit);
+        Self(policy)
+    }
+
+    /// Converts an access property created by the CUDA APIs (e.g. `cuda::access_property`) into
+    /// a cache eviction policy (`createpolicy.cvt.L2`).
+    ///
+    /// # Safety
+    ///
+    /// `access_property` must be the raw 64-bit value of an access property created by the CUDA
+    /// APIs.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-createpolicy>
+    #[inline]
+    pub unsafe fn from_access_property(access_property: u64) -> Self {
+        let policy: u64;
+        unsafe {
+            asm!(
+                "createpolicy.cvt.L2.b64 {p}, {a};",
+                p = out(reg64) policy,
+                a = in(reg64) access_property,
+                options(pure, nomem, nostack),
+            )
+        }
+        Self(policy)
+    }
 }
 
 /// A PTX state space, used to query which window of the generic address space a pointer lies in.
@@ -74,7 +275,8 @@ pub fn prefetch<const LEVEL: CacheLevel, T>(ptr: *const T) {
 }
 
 /// Prefetches the cache line containing `ptr` into the L2 cache, with the eviction priority
-/// `PRIORITY` applied to the prefetched cache line.
+/// `PRIORITY` applied to the prefetched cache line. `PRIORITY` must be
+/// [`L2EvictionPriority::Normal`] or [`L2EvictionPriority::Last`].
 ///
 /// # Safety
 ///
@@ -86,6 +288,15 @@ pub fn prefetch<const LEVEL: CacheLevel, T>(ptr: *const T) {
 #[cfg(target_feature = "sm_90")]
 #[inline]
 pub unsafe fn prefetch_l2_with_priority<const PRIORITY: L2EvictionPriority, T>(ptr: *const T) {
+    const {
+        assert!(
+            matches!(
+                PRIORITY,
+                L2EvictionPriority::Normal | L2EvictionPriority::Last
+            ),
+            "prefetch only supports the Normal and Last eviction priorities"
+        )
+    };
     const_map!(PRIORITY => PRIO: nv::L2EvictionPriority {
         L2EvictionPriority::Normal => nv::L2EvictionPriority::EvictNormal,
         L2EvictionPriority::Last => nv::L2EvictionPriority::EvictLast,
@@ -250,7 +461,7 @@ pub fn to_shared_address<T>(ptr: *const T) -> u32 {
     let address: u64;
     // SAFETY: `cvta` only reads and writes registers.
     unsafe {
-        core::arch::asm!(
+        asm!(
             "cvta.to.shared.u64 {address}, {ptr};",
             address = out(reg64) address,
             ptr = in(reg64) ptr.expose_provenance(),
