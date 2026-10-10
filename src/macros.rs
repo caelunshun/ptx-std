@@ -74,27 +74,33 @@ macro_rules! const_map {
 ///     DECOMPRESS => { CopyDecompression::None => "", CopyDecompression::B4x16P64 => ".b8x16.b4x16_p64" },
 /// )
 /// ```
+///
+/// The callback may also be given as `$cb!(tokens...)`, in which case the tokens are passed to it
+/// before the selected literals, e.g. `$cb!(tokens... ".a", ".b")`.
 #[allow(unused_macros)]
 macro_rules! asm_variants {
-    ($cb:ident; $($scrut:expr => { $($pat:pat => $lit:literal),+ $(,)? }),* $(,)?) => {
-        asm_variants!(@next $cb [] [$([$scrut => { $($pat => $lit),+ }])*])
+    ($cb:ident; $($groups:tt)*) => {
+        asm_variants!($cb!(); $($groups)*)
     };
-    (@next $cb:ident [$($acc:literal)*] []) => {
-        $cb!($($acc),*)
+    ($cb:ident!($($pre:tt)*); $($scrut:expr => { $($pat:pat => $lit:literal),+ $(,)? }),* $(,)?) => {
+        asm_variants!(@next $cb ($($pre)*) [] [$([$scrut => { $($pat => $lit),+ }])*])
     };
-    (@next $cb:ident $acc:tt [[$($group:tt)*] $($rest:tt)*]) => {
-        asm_variants!(@group $cb $acc [$($rest)*] $($group)*)
+    (@next $cb:ident ($($pre:tt)*) [$($acc:literal)*] []) => {
+        $cb!($($pre)* $($acc),*)
     };
-    // The accumulated literals and remaining groups are passed as single token trees, so that they
-    // can be used inside the repetition over the patterns of this group.
-    (@group $cb:ident $acc:tt $rest:tt $scrut:expr => { $($pat:pat => $lit:literal),+ }) => {
+    (@next $cb:ident $pre:tt $acc:tt [[$($group:tt)*] $($rest:tt)*]) => {
+        asm_variants!(@group $cb $pre $acc [$($rest)*] $($group)*)
+    };
+    // The prefix tokens, accumulated literals and remaining groups are passed as single token
+    // trees, so that they can be used inside the repetition over the patterns of this group.
+    (@group $cb:ident $pre:tt $acc:tt $rest:tt $scrut:expr => { $($pat:pat => $lit:literal),+ }) => {
         $(if const { matches!($scrut, $pat) } {
-            asm_variants!(@push $cb $acc $lit $rest)
+            asm_variants!(@push $cb $pre $acc $lit $rest)
         } else)+ {
             unreachable!()
         }
     };
-    (@push $cb:ident [$($acc:literal)*] $lit:literal $rest:tt) => {
-        asm_variants!(@next $cb [$($acc)* $lit] $rest)
+    (@push $cb:ident $pre:tt [$($acc:literal)*] $lit:literal $rest:tt) => {
+        asm_variants!(@next $cb $pre [$($acc)* $lit] $rest)
     };
 }

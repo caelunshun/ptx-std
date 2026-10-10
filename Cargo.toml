@@ -10,3 +10,8 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 name = "tcgen05_ptxas"
 path = "examples/tcgen05_ptxas/main.rs"
 crate-type = ["rlib"]
+
+[[example]]
+name = "atomic_ptxas"
+path = "examples/atomic_ptxas/main.rs"
+crate-type = ["rlib"]

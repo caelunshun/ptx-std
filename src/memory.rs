@@ -281,7 +281,8 @@ pub unsafe fn zero_fill_shared(ptr: *mut u8, size: usize) {
     unsafe { nv::st_bulk::<{ nv::StateSpace::Generic }>(ptr.cast(), size as u64) }
 }
 
-/// The kind of global memory targeted by [`store_async_release`].
+/// The kind of global memory targeted by [`store_async_release`] and
+/// [`red_async_add_release`](crate::atomic::red_async_add_release).
 #[cfg(target_feature = "sm_100")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum AsyncStoreTarget {
@@ -348,10 +349,10 @@ impl_async_store! {
 }
 
 #[cfg(target_feature = "sm_100")]
-const fn assert_async_store_supported(scope: Scope, target: AsyncStoreTarget) {
+pub(crate) const fn assert_async_store_supported(scope: Scope, target: AsyncStoreTarget) {
     assert!(
         matches!(scope, Scope::Gpu | Scope::System),
-        "store_async_release only supports the GPU and system scopes"
+        "only the GPU and system scopes are supported"
     );
     assert!(
         !matches!(target, AsyncStoreTarget::Mmio) || matches!(scope, Scope::System),

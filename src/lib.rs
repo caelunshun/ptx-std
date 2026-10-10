@@ -15,6 +15,7 @@ compile_error!("this crate requires an Ampere (sm_80) or later GPU target");
 mod macros;
 
 pub mod alloc;
+pub mod atomic;
 pub mod barrier;
 pub mod cluster;
 pub mod cp_async;
