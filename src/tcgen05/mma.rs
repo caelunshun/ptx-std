@@ -63,8 +63,9 @@ pub enum AShift {
 /// elements along K. `.block32` is an alias for `.scale_vec::1X` with
 /// [`MmaKind::Mxf8f6f4`] and for `.scale_vec::2X` with [`MmaKind::Mxf4`] and
 /// [`MmaKind::Mxf4nvf4`], and `.block16` is an alias for `.scale_vec::4X` with
-/// [`MmaKind::Mxf4nvf4`]; for the 4-bit kinds, the aliases only hold for `K = 64` or `K = 128`
-/// (with `K = 96`, the `.blockN` forms imply 3 or 6 scale factors per row).
+/// [`MmaKind::Mxf4nvf4`]; for the 4-bit kinds, the aliases only hold for `K = 64` or `K = 128`.
+/// In general, `.blockN` implies `K / N` scale factors per row (for example 3 with `.block32` and
+/// 6 with `.block16` for `K = 96`).
 ///
 /// | Kind | Valid values |
 /// |---|---|
@@ -72,8 +73,9 @@ pub enum AShift {
 /// | [`MmaKind::Mxf4`] | `Default`, `Vec2X`\*, `Block32` |
 /// | [`MmaKind::Mxf4nvf4`] | `Vec2X`\*, `Vec4X`\*, `Block16`, `Block32` |
 ///
-/// \* Requires an architecture-specific (`a`) target; the `.blockN` forms are also available on
-/// the family-specific (`f`) targets.
+/// \* The PTX ISA lists only `sm_100a` for the `.scale_vec::NX` forms (this crate's compile-time
+/// check accepts any architecture-specific target). The `.blockN` forms require `sm_100f` or
+/// `sm_110f` (or the corresponding `a` targets).
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
@@ -149,6 +151,8 @@ impl MmaModifiers {
 ///
 /// A weight-stationary MMA has four collector buffers for matrix B (which holds the activations
 /// instead of the weights), selected by [`collector_b_buffer`](Self::collector_b_buffer).
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma-ws>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub struct MmaWsModifiers {
     /// The index of the collector buffer for matrix B, in `0..4` (`.collector::b0` to
@@ -454,6 +458,13 @@ pub unsafe fn mma<const CTA_GROUP: CtaGroup, const MODS: MmaModifiers, const KIN
 /// the metadata at `sparse_metadata` in Tensor Memory. The sparsity selector in the instruction
 /// descriptor determines which part of the metadata is used.
 ///
+/// The sparsity granularity is `1:2` for [`MmaKind::Tf32`], and `2:4` for the other kinds (each
+/// chunk of 2 or 4 adjacent elements of a row of A holds 1 or 2 non-zero elements, which are the
+/// only ones stored). Metadata indices other than the ones described in the PTX ISA result in
+/// undefined behavior.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-sparse-matrices>
+///
 /// See [`mma`] for the other operands, modifiers and semantics.
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f`, with these exceptions, checked at compile time:
@@ -671,9 +682,9 @@ unsafe fn mma_impl<
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f`. The `.scale_vec::NX` forms
 /// ([`ScaleVectorSize::Vec1X`], [`Vec2X`](ScaleVectorSize::Vec2X) and
-/// [`Vec4X`](ScaleVectorSize::Vec4X)) require `sm_100a`, `sm_101a`, `sm_103a` or `sm_110a`, which
-/// is checked at compile time. The scale type `ue5m3` and `ue4m3` with
-/// [`ScaleVectorSize::Block32`] are only supported by `sm_107`.
+/// [`Vec4X`](ScaleVectorSize::Vec4X)) require `sm_100a` according to the PTX ISA (the compile-time
+/// check accepts `sm_100a`, `sm_101a`, `sm_103a` and `sm_110a`). The scale type `ue5m3`, and `ue4m3` with
+/// [`ScaleVectorSize::Block32`], require `sm_107f`; the behavior is undefined on other targets.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-instructions-mma>
 ///
@@ -715,7 +726,12 @@ pub unsafe fn mma_block_scaled<
 /// Sparse block-scaled matrix multiply-accumulate (`tcgen05.mma.sp` with `.block_scale`).
 ///
 /// Like [`mma_block_scaled`], but matrix A is a sparse `M×(K/2)` matrix whose non-zero elements
-/// are selected by the metadata at `sparse_metadata` in Tensor Memory.
+/// are selected by the metadata at `sparse_metadata` in Tensor Memory. The sparsity granularity
+/// is `2:4` for [`MmaKind::Mxf8f6f4`], and `4:8` in pairs of adjacent elements for
+/// [`MmaKind::Mxf4`] and [`MmaKind::Mxf4nvf4`] (sparsity version `v0` of the instruction
+/// descriptor).
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-sparse-matrices>
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f` for [`MmaKind::Mxf8f6f4`], and `sm_100a`, `sm_101a`,
 /// `sm_103a` or `sm_110a` for [`MmaKind::Mxf4`] and [`MmaKind::Mxf4nvf4`] and for the
@@ -880,9 +896,12 @@ unsafe fn block_scaled_impl<
 /// [`MmaWsModifiers`].
 ///
 /// This is always a `.cta_group::1` operation, so a kernel using it must use
-/// [`CtaGroup::One`] for all its `tcgen05` instructions. `KIND` is inferred from `idesc` and
-/// must be [`MmaKind::F16`], [`MmaKind::Tf32`], [`MmaKind::F8f6f4`] or [`MmaKind::I8`]. The
-/// block-scaled kinds, `disable_output_lanes`, `.ashift` and `scale-input-d` are not supported.
+/// [`CtaGroup::One`] for all its `tcgen05` instructions. `M` is 32, 64 or 128, and the lane of
+/// `d`, of a Tensor Memory matrix A and of the sparsity metadata must be 0.
+///
+/// `KIND` is inferred from `idesc` and must be [`MmaKind::F16`], [`MmaKind::Tf32`],
+/// [`MmaKind::F8f6f4`] or [`MmaKind::I8`]. The block-scaled kinds, `disable_output_lanes`,
+/// `.ashift` and `scale-input-d` are not supported.
 ///
 /// - `zero_column_mask`: if `Some`, the descriptor from which the hardware generates a mask of
 ///   the columns of matrix B that are treated as zero, regardless of their values in shared
@@ -925,7 +944,8 @@ pub unsafe fn mma_ws<const MODS: MmaWsModifiers, const KIND: MmaKind>(
 /// Weight-stationary sparse matrix multiply-accumulate `D = A*B + D` (`tcgen05.mma.ws.sp`).
 ///
 /// Like [`mma_ws`], but matrix A is a sparse `M×(K/2)` matrix whose non-zero elements are
-/// selected by the metadata at `sparse_metadata` in Tensor Memory.
+/// selected by the metadata at `sparse_metadata` in Tensor Memory. See [`mma_sparse`] for the
+/// sparsity granularity.
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f`; [`MmaKind::I8`] requires `sm_100a`, `sm_101a` or
 /// `sm_110a`. This is checked at compile time.

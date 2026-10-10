@@ -11,8 +11,8 @@ use super::narrow::{narrow_x2, narrow_x4};
 
 /// Two packed FP4 E2M1 values (1 sign, 2 exponent and 1 mantissa bit; exponent bias 1).
 ///
-/// The format has no infinities or NaNs; the largest finite magnitude is 6.0. Element 0 occupies the
-/// low 4 bits.
+/// The format has no infinities or NaNs; the representable magnitudes are 0, 0.5, 1, 1.5, 2, 3, 4
+/// and 6, so the largest finite magnitude is 6.0. Element 0 occupies the low 4 bits.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#alternate-floating-point-data-formats>
 #[derive(Clone, Copy, Pod, Zeroable)]

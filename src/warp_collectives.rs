@@ -247,14 +247,16 @@ impl Not for LaneMask {
 }
 
 /// Waits until all threads in `mask` have executed `bar.warp.sync` with the same mask. Also
-/// guarantees memory ordering among the participating threads (`bar.warp.sync`).
+/// guarantees memory ordering among the participating threads (`bar.warp.sync`), so threads of
+/// the warp can communicate through memory by storing, calling `sync_warp`, and then reading the
+/// values stored by the other threads.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar-warp-sync>
 ///
 /// # Safety
 ///
-/// The executing thread must be a member of `mask`, and all non-exited threads in `mask` must
-/// execute the same `sync_warp` with the same `mask`.
+/// The executing thread must be a member of `mask`, and all threads in `mask` must execute the
+/// same `sync_warp` with the same `mask`.
 #[inline(always)]
 pub unsafe fn sync_warp(mask: LaneMask) {
     unsafe { nv::bar_warp_sync(mask.0) }
@@ -347,7 +349,12 @@ unsafe fn shuffle_word_checked<const MODE: ShuffleMode, const WIDTH: u32>(
 /// * [`ShuffleMode::Down`]: the lane `operand` above. If that falls after the end of the
 ///   segment, the lane receives its own `value`.
 /// * [`ShuffleMode::Xor`]: the lane whose index is the executing lane's index XOR `operand`. If
-///   that falls outside the segment, the lane receives its own `value`.
+///   that lies above the end of the segment, the lane receives its own `value`. Note that a
+///   source lane in a *lower* segment is not considered out of range and is read normally.
+///
+/// Only the low 5 bits of `operand` are used. For [`ShuffleMode::Index`], the bits of `operand`
+/// that select a segment (above `log2(WIDTH)`) are ignored, so the index wraps within the
+/// segment, and the source lane is therefore always in range.
 ///
 /// If the source lane is not in `mask` or has exited, the received value is undefined.
 ///
@@ -378,8 +385,9 @@ pub unsafe fn shuffle_segmented<const MODE: ShuffleMode, const WIDTH: u32, T: Po
     })
 }
 
-/// Like [`shuffle_segmented`], but returns `None` if the source lane lies outside the lane's
-/// segment (in which case [`shuffle_segmented`] would return the lane's own value).
+/// Like [`shuffle_segmented`], but returns `None` if the source lane is out of range (in which
+/// case [`shuffle_segmented`] would return the lane's own value). This is the destination
+/// predicate of `shfl.sync`. Never returns `None` for [`ShuffleMode::Index`].
 ///
 /// # Safety
 ///
@@ -423,7 +431,7 @@ pub unsafe fn shuffle<T: Pod>(mask: LaneMask, value: T, src_lane: u32) -> T {
 }
 
 /// Reads `value` from the lane `delta` below the executing lane (`shfl.sync.up`). Lanes with an
-/// index below `delta` receive their own `value`.
+/// index below `delta` receive their own `value`. Only the low 5 bits of `delta` are used.
 ///
 /// If the source lane is not in `mask` or has exited, the received value is undefined. See
 /// [`shuffle_segmented`] for the supported types and for segmented shuffles.
@@ -440,7 +448,8 @@ pub unsafe fn shuffle_up<T: Pod>(mask: LaneMask, value: T, delta: u32) -> T {
 }
 
 /// Reads `value` from the lane `delta` above the executing lane (`shfl.sync.down`). Lanes whose
-/// source would be past lane 31 receive their own `value`.
+/// source would be past lane 31 receive their own `value`. Only the low 5 bits of `delta` are
+/// used.
 ///
 /// If the source lane is not in `mask` or has exited, the received value is undefined. See
 /// [`shuffle_segmented`] for the supported types and for segmented shuffles.
@@ -494,8 +503,8 @@ pub unsafe fn try_shuffle_down<T: Pod>(mask: LaneMask, value: T, delta: u32) -> 
     unsafe { try_shuffle_segmented::<{ ShuffleMode::Down }, 32, T>(mask, value, delta) }
 }
 
-/// Returns whether `predicate` is true for all threads in `mask` (`vote.sync.all`). The result is
-/// the same for all threads in `mask`.
+/// Returns whether `predicate` is true for all non-exited threads in `mask` (`vote.sync.all`).
+/// The result is the same for all threads in `mask`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-vote-sync>
 ///
@@ -508,8 +517,8 @@ pub unsafe fn vote_all(mask: LaneMask, predicate: bool) -> bool {
     unsafe { nv::vote_sync_pred::<{ nv::VoteMode::All }>(predicate, mask.0) }
 }
 
-/// Returns whether `predicate` is true for any thread in `mask` (`vote.sync.any`). The result is
-/// the same for all threads in `mask`.
+/// Returns whether `predicate` is true for any non-exited thread in `mask` (`vote.sync.any`). The
+/// result is the same for all threads in `mask`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-vote-sync>
 ///
@@ -522,8 +531,8 @@ pub unsafe fn vote_any(mask: LaneMask, predicate: bool) -> bool {
     unsafe { nv::vote_sync_pred::<{ nv::VoteMode::Any }>(predicate, mask.0) }
 }
 
-/// Returns whether `predicate` has the same value (all true or all false) in all threads in `mask`
-/// (`vote.sync.uni`). The result is the same for all threads in `mask`.
+/// Returns whether `predicate` has the same value (all true or all false) in all non-exited
+/// threads in `mask` (`vote.sync.uni`). The result is the same for all threads in `mask`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-vote-sync>
 ///
@@ -536,8 +545,9 @@ pub unsafe fn vote_uniform(mask: LaneMask, predicate: bool) -> bool {
     unsafe { nv::vote_sync_pred::<{ nv::VoteMode::Uni }>(predicate, mask.0) }
 }
 
-/// Returns the set of threads in `mask` for which `predicate` is true (`vote.sync.ballot`). The
-/// result is the same for all threads in `mask`.
+/// Returns the set of threads in `mask` for which `predicate` is true (`vote.sync.ballot`). Bit
+/// `i` of the result is the predicate of lane `i`; lanes not in `mask` contribute 0. The result
+/// is the same for all threads in `mask`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-vote-sync>
 ///
@@ -550,8 +560,8 @@ pub unsafe fn ballot(mask: LaneMask, predicate: bool) -> LaneMask {
     LaneMask(unsafe { nv::vote_sync_ballot_b32(predicate, mask.0) })
 }
 
-/// Returns the set of threads in `mask` whose `value` is bitwise equal to the executing thread's
-/// (`match.any.sync`).
+/// Returns the set of non-exited threads in `mask` whose `value` is bitwise equal to the executing
+/// thread's (`match.any.sync`).
 ///
 /// `T` must be 4 or 8 bytes in size; floating-point values are compared by bit pattern.
 ///
@@ -579,8 +589,8 @@ pub unsafe fn match_any<T: Pod>(mask: LaneMask, value: T) -> LaneMask {
     })
 }
 
-/// Returns whether `value` is bitwise equal in all threads in `mask` (`match.all.sync`). The
-/// result is the same for all threads in `mask`.
+/// Returns whether `value` is bitwise equal in all non-exited threads in `mask`
+/// (`match.all.sync`). The result is the same for all threads in `mask`.
 ///
 /// `T` must be 4 or 8 bytes in size; floating-point values are compared by bit pattern.
 ///
@@ -687,8 +697,9 @@ impl ReduxInt for i32 {
     }
 }
 
-/// Reduces `value` across the threads of `mask` with the operation `OP` and returns the result to
-/// all of them (`redux.sync`). Works on `u32` and `i32`; all [`ReduxOp`]s are supported.
+/// Reduces `value` across the non-exited threads of `mask` with the operation `OP` and returns the
+/// result to all of them (`redux.sync`). Works on `u32` and `i32`; all [`ReduxOp`]s are
+/// supported. The result of [`ReduxOp::Add`] is truncated to 32 bits.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-redux-sync>
 ///
@@ -701,15 +712,15 @@ pub unsafe fn reduce<const OP: ReduxOp, T: ReduxInt>(mask: LaneMask, value: T) -
     unsafe { T::reduce::<OP>(mask, value) }
 }
 
-/// Reduces the `f32` `value` across the threads of `mask` with the operation `OP` and returns the
-/// result to all of them (`redux.sync.{min,max}.f32`).
+/// Reduces the `f32` `value` across the non-exited threads of `mask` with the operation `OP` and
+/// returns the result to all of them (`redux.sync.{min,max}{.abs}{.NaN}.f32`).
 ///
 /// `OP` must be [`ReduxOp::Min`] or [`ReduxOp::Max`]. If `ABS` is [`Absolute::Enabled`], the
 /// absolute values of the inputs are reduced. With [`NanHandling::Ignore`], NaN inputs are ignored
 /// unless all inputs are NaN; with [`NanHandling::Propagate`], any NaN input makes the result
-/// NaN.
+/// NaN. In both cases a NaN result is the canonical NaN. +0.0 is considered greater than -0.0.
 ///
-/// Requires the `sm_100f` family or `sm_100a`.
+/// Requires `sm_100a` (PTX ISA 8.6) or the `sm_100f` family (PTX ISA 8.8).
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-redux-sync>
 ///
@@ -749,7 +760,8 @@ pub struct Election {
 
 /// Elects one thread among the threads of `mask` (`elect.sync`).
 ///
-/// The elected thread is the same for all threads in `mask`.
+/// The elected thread is the same for all threads in `mask`, and the election is deterministic:
+/// the same leader is elected for the same `mask` every time.
 ///
 /// Requires `sm_90`.
 ///

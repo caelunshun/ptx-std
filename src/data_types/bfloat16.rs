@@ -90,9 +90,9 @@ impl bf16 {
     ///
     /// - `RND` selects the rounding mode and must be [`Rounding::NearestEven`] or
     ///   [`Rounding::TowardZero`].
-    /// - `R` optionally clamps negative results to zero.
+    /// - `R` optionally clamps negative results to zero (NaN results become canonical NaN).
     /// - `O` selects whether out-of-range results become infinity or are clamped to the finite
-    ///   range of `bf16`.
+    ///   range of `bf16` (`.satfinite`; NaN inputs still produce NaN).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -142,6 +142,8 @@ impl bf16 {
     }
 
     /// Computes the absolute value by clearing the sign bit.
+    ///
+    /// Unlike PTX `abs.bf16`, this preserves the NaN payload.
     #[inline]
     pub const fn abs(self) -> Self {
         Self(self.0 & 0x7FFF)
@@ -156,7 +158,8 @@ impl bf16 {
         self.mul_add_with::<{ Relu::Disabled }>(b, c)
     }
 
-    /// Fused multiply-add, optionally clamping negative results to zero (`R`).
+    /// Fused multiply-add, optionally clamping negative results to zero (`R`; NaN results become
+    /// canonical NaN).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[inline]
@@ -187,9 +190,11 @@ impl bf16 {
 
     /// Returns the minimum of two values with explicit modifiers.
     ///
-    /// `-0.0` is treated as less than `+0.0`. `N` selects the NaN handling. `X` selects whether
-    /// the result has the minimum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// `-0.0` is treated as less than `+0.0`. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether the result has the minimum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline]
@@ -208,9 +213,11 @@ impl bf16 {
 
     /// Returns the maximum of two values with explicit modifiers.
     ///
-    /// `+0.0` is treated as greater than `-0.0`. `N` selects the NaN handling. `X` selects whether
-    /// the result has the maximum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// `+0.0` is treated as greater than `-0.0`. `N` selects the NaN handling:
+    /// [`NanHandling::Ignore`] returns the other input if exactly one is NaN,
+    /// [`NanHandling::Propagate`] yields a canonical NaN if either input is NaN. `X` selects
+    /// whether the result has the maximum absolute value of the inputs and the XOR of their signs
+    /// (skipped if the result is NaN); this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline]
@@ -232,7 +239,9 @@ impl bf16 {
 impl bf16 {
     /// Computes `2^self`, approximately (`ex2.approx.ftz.bf16`).
     ///
-    /// The maximum relative error is 2^-7. Subnormal inputs and results are flushed to sign-preserving zero.
+    /// The maximum relative error is 2^-7. Subnormal inputs and results are flushed to
+    /// sign-preserving zero. `-inf` gives `+0.0`, subnormal inputs of either sign give `+1.0` and
+    /// `+inf` gives `+inf`.
     ///
     /// Requires `sm_90`.
     ///
@@ -467,9 +476,9 @@ impl bf16x2 {
     ///
     /// - `RND` selects the rounding mode and must be [`Rounding::NearestEven`] or
     ///   [`Rounding::TowardZero`].
-    /// - `R` optionally clamps negative results to zero.
+    /// - `R` optionally clamps negative results to zero (NaN results become canonical NaN).
     /// - `O` selects whether out-of-range results become infinity or are clamped to the finite
-    ///   range of `bf16`.
+    ///   range of `bf16` (`.satfinite`; NaN inputs still produce NaN).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -493,11 +502,13 @@ impl bf16x2 {
 
     /// Converts two `f32` values to `bf16` using stochastic rounding.
     ///
-    /// `rbits` supplies the random bits that drive the rounding. `R` optionally clamps negative
-    /// results to zero. `O` selects whether out-of-range results become infinity or are clamped
-    /// to the finite range of `bf16`.
+    /// Each result is rounded towards or away from zero depending on the carry out of adding the
+    /// random bits to the mantissa bits discarded by the conversion. The upper 16 bits of `rbits`
+    /// are used for `hi` and the lower 16 bits for `lo`. `R` optionally clamps negative results to
+    /// zero. `O` selects whether out-of-range results become infinity or are clamped to the finite
+    /// range of `bf16`.
     ///
-    /// Requires `sm_100a` or `sm_103a`.
+    /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
@@ -513,6 +524,8 @@ impl bf16x2 {
     }
 
     /// Computes the absolute value of each element by clearing the sign bits.
+    ///
+    /// Unlike PTX `abs.bf16x2`, this preserves NaN payloads.
     #[inline]
     pub const fn abs(self) -> Self {
         Self(self.0 & 0x7FFF_7FFF)
@@ -527,7 +540,8 @@ impl bf16x2 {
         self.mul_add_with::<{ Relu::Disabled }>(b, c)
     }
 
-    /// Element-wise fused multiply-add, optionally clamping negative results to zero (`R`).
+    /// Element-wise fused multiply-add, optionally clamping negative results to zero (`R`; NaN
+    /// results become canonical NaN).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[inline]
@@ -558,9 +572,11 @@ impl bf16x2 {
 
     /// Returns the element-wise minimum with explicit modifiers.
     ///
-    /// `-0.0` is treated as less than `+0.0`. `N` selects the NaN handling. `X` selects whether
-    /// each result has the minimum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// `-0.0` is treated as less than `+0.0`. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether each result has the minimum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline]
@@ -579,9 +595,11 @@ impl bf16x2 {
 
     /// Returns the element-wise maximum with explicit modifiers.
     ///
-    /// `+0.0` is treated as greater than `-0.0`. `N` selects the NaN handling. `X` selects whether
-    /// each result has the maximum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// `+0.0` is treated as greater than `-0.0`. `N` selects the NaN handling:
+    /// [`NanHandling::Ignore`] returns the other input if exactly one is NaN,
+    /// [`NanHandling::Propagate`] yields a canonical NaN if either input is NaN. `X` selects
+    /// whether each result has the maximum absolute value of the inputs and the XOR of their signs
+    /// (skipped if the result is NaN); this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline]
@@ -603,7 +621,9 @@ impl bf16x2 {
 impl bf16x2 {
     /// Computes `2^x` of each element, approximately (`ex2.approx.ftz.bf16x2`).
     ///
-    /// The maximum relative error of each element is 2^-7 (as for `ex2.approx.ftz.bf16`). Subnormal inputs and results are flushed to sign-preserving zero.
+    /// The maximum relative error of each element is 2^-7 (as for `ex2.approx.ftz.bf16`).
+    /// Subnormal inputs and results are flushed to sign-preserving zero. `-inf` gives `+0.0`,
+    /// subnormal inputs of either sign give `+1.0` and `+inf` gives `+inf`.
     ///
     /// Requires `sm_90`.
     ///

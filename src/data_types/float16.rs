@@ -16,8 +16,9 @@ mod prim {
 
 /// IEEE 754 binary16 half-precision float.
 ///
-/// Arithmetic operators round to nearest, ties to even. Methods suffixed `_with` select
-/// instruction modifiers (flush-to-zero, saturation, ...) via const generics.
+/// Arithmetic operators round to nearest, ties to even, and preserve subnormal values. Methods
+/// suffixed `_with` select instruction modifiers (flush-to-zero, saturation, ...) via const
+/// generics.
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(transparent)]
 pub struct f16(u16);
@@ -94,12 +95,12 @@ impl f16 {
     ///
     /// - `RND` selects the rounding mode and must be [`Rounding::NearestEven`] or
     ///   [`Rounding::TowardZero`].
-    /// - `D` selects whether subnormal values are flushed to zero. [`Denormals::FlushToZero`] is
-    ///   only supported with `NearestEven` rounding, [`Relu::Disabled`] and
-    ///   [`Overflow::Infinity`].
-    /// - `R` optionally clamps negative results to zero.
+    /// - `D` selects whether subnormal `f32` inputs are flushed to sign-preserving zero (`.ftz`
+    ///   applies only to single-precision inputs and results). [`Denormals::FlushToZero`] is only
+    ///   supported with `NearestEven` rounding, [`Relu::Disabled`] and [`Overflow::Infinity`].
+    /// - `R` optionally clamps negative results to zero (NaN results become canonical NaN).
     /// - `O` selects whether out-of-range results become infinity or are clamped to the finite
-    ///   range of `f16`.
+    ///   range of `f16` (`.satfinite`; NaN inputs still produce NaN).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -168,7 +169,7 @@ impl f16 {
         !self.is_sign_negative()
     }
 
-    /// Computes the absolute value.
+    /// Computes the absolute value. A NaN input yields an unspecified NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
     #[inline]
@@ -176,7 +177,8 @@ impl f16 {
         self.abs_with::<{ Denormals::Preserve }>()
     }
 
-    /// Computes the absolute value, optionally flushing subnormal inputs and results to zero.
+    /// Computes the absolute value, optionally flushing subnormal inputs and results to
+    /// sign-preserving zero. A NaN input yields an unspecified NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
     #[inline]
@@ -187,9 +189,9 @@ impl f16 {
 
     /// Adds two values with explicit modifiers; rounds to nearest, ties to even.
     ///
-    /// `D` selects whether subnormal inputs and results are flushed to zero; it is only
-    /// supported together with [`Saturation::ClampToUnit`]. `S` optionally clamps the result to
-    /// `[0.0, 1.0]`.
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
+    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
+    /// optionally clamps the result to `[0.0, 1.0]` (NaN results become `+0.0`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-add>
     #[inline]
@@ -221,9 +223,9 @@ impl f16 {
 
     /// Multiplies two values with explicit modifiers; rounds to nearest, ties to even.
     ///
-    /// `D` selects whether subnormal inputs and results are flushed to zero; it is only
-    /// supported together with [`Saturation::ClampToUnit`]. `S` optionally clamps the result to
-    /// `[0.0, 1.0]`.
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
+    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
+    /// optionally clamps the result to `[0.0, 1.0]` (NaN results become `+0.0`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-mul>
     #[inline]
@@ -254,8 +256,9 @@ impl f16 {
 
     /// Fused multiply-add with explicit modifiers.
     ///
-    /// `D` selects whether subnormal inputs and results are flushed to zero. `S` clamps the result
-    /// to `[0.0, 1.0]`, and `R` clamps negative results to zero; they cannot be combined.
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero. `S`
+    /// clamps the result to `[0.0, 1.0]` (NaN results become `+0.0`), and `R` clamps negative
+    /// results to zero (NaN results become canonical NaN); they cannot be combined.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[inline]
@@ -282,10 +285,13 @@ impl f16 {
 
     /// Fused multiply-add with the out-of-bounds (OOB) modifier.
     ///
-    /// The result is clamped to zero if either operand is an OOB NaN, as produced by out-of-bounds
-    /// tensor accesses. `R` optionally clamps negative results to zero.
+    /// The result is forced to `+0.0` if either operand is an [OOB-NaN], the special NaN produced
+    /// by out-of-bounds elements of tensor accesses in the `OOB-NaN` fill mode. `R` optionally
+    /// clamps negative results to zero.
     ///
     /// Requires `sm_90`.
+    ///
+    /// [OOB-NaN]: https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-tiled-mode-oob-access
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[cfg(target_feature = "sm_90")]
@@ -297,7 +303,8 @@ impl f16 {
 
     /// Computes `2^self`, approximately (`ex2.approx.f16`).
     ///
-    /// The maximum relative error is 2^-9.9. Subnormal inputs are supported.
+    /// The maximum relative error is 2^-9.9. Subnormal inputs are supported. `-inf` gives `+0.0`
+    /// and `+inf` gives `+inf`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-ex2>
     #[inline]
@@ -330,9 +337,11 @@ impl f16 {
     /// Returns the minimum of two values with explicit modifiers.
     ///
     /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling. `X` selects whether the
-    /// result has the minimum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether the result has the minimum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline]
@@ -356,9 +365,11 @@ impl f16 {
     /// Returns the maximum of two values with explicit modifiers.
     ///
     /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling. `X` selects whether the
-    /// result has the maximum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether the result has the maximum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline]
@@ -486,8 +497,9 @@ impl MulAssign for f16 {
 
 /// Two packed [`f16`](crate::f16) values. Element 0 occupies the low 16 bits.
 ///
-/// Arithmetic operators act element-wise and round to nearest, ties to even. Methods suffixed
-/// `_with` select instruction modifiers (flush-to-zero, saturation, ...) via const generics.
+/// Arithmetic operators act element-wise, round to nearest, ties to even, and preserve subnormal
+/// values. Methods suffixed `_with` select instruction modifiers (flush-to-zero, saturation, ...)
+/// via const generics.
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(transparent)]
 pub struct f16x2(u32);
@@ -590,9 +602,9 @@ impl f16x2 {
     ///
     /// - `RND` selects the rounding mode and must be [`Rounding::NearestEven`] or
     ///   [`Rounding::TowardZero`].
-    /// - `R` optionally clamps negative results to zero.
+    /// - `R` optionally clamps negative results to zero (NaN results become canonical NaN).
     /// - `O` selects whether out-of-range results become infinity or are clamped to the finite
-    ///   range of `f16`.
+    ///   range of `f16` (`.satfinite`; NaN inputs still produce NaN).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -616,11 +628,13 @@ impl f16x2 {
 
     /// Converts two `f32` values to `f16` using stochastic rounding.
     ///
-    /// `rbits` supplies the random bits that drive the rounding. `R` optionally clamps negative
-    /// results to zero. `O` selects whether out-of-range results become infinity or are clamped
-    /// to the finite range of `f16`.
+    /// Each result is rounded towards or away from zero depending on the carry out of adding the
+    /// random bits to the mantissa bits discarded by the conversion. The 13 least significant bits
+    /// of the upper half of `rbits` are used for `hi` and those of the lower half for `lo`; the
+    /// remaining bits are ignored. `R` optionally clamps negative results to zero. `O` selects
+    /// whether out-of-range results become infinity or are clamped to the finite range of `f16`.
     ///
-    /// Requires `sm_100a` or `sm_103a`.
+    /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
@@ -635,7 +649,7 @@ impl f16x2 {
                 Self::from_core(unsafe { nv::cvt_rs_f16x2_f32::<RELU, SAT>(hi, lo, rbits) })))
     }
 
-    /// Computes the absolute value of each element.
+    /// Computes the absolute value of each element. A NaN input yields an unspecified NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
     #[inline]
@@ -644,7 +658,7 @@ impl f16x2 {
     }
 
     /// Computes the absolute value of each element, optionally flushing subnormal inputs and
-    /// results to zero.
+    /// results to sign-preserving zero. A NaN input yields an unspecified NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
     #[inline]
@@ -655,9 +669,9 @@ impl f16x2 {
 
     /// Adds element-wise with explicit modifiers; rounds to nearest, ties to even.
     ///
-    /// `D` selects whether subnormal inputs and results are flushed to zero; it is only
-    /// supported together with [`Saturation::ClampToUnit`]. `S` optionally clamps each result to
-    /// `[0.0, 1.0]`.
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
+    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
+    /// optionally clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-add>
     #[inline]
@@ -689,9 +703,9 @@ impl f16x2 {
 
     /// Multiplies element-wise with explicit modifiers; rounds to nearest, ties to even.
     ///
-    /// `D` selects whether subnormal inputs and results are flushed to zero; it is only
-    /// supported together with [`Saturation::ClampToUnit`]. `S` optionally clamps each result to
-    /// `[0.0, 1.0]`.
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
+    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
+    /// optionally clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-mul>
     #[inline]
@@ -722,8 +736,9 @@ impl f16x2 {
 
     /// Element-wise fused multiply-add with explicit modifiers.
     ///
-    /// `D` selects whether subnormal inputs and results are flushed to zero. `S` clamps each
-    /// result to `[0.0, 1.0]`, and `R` clamps negative results to zero; they cannot be combined.
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero. `S`
+    /// clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`), and `R` clamps negative
+    /// results to zero (NaN results become canonical NaN); they cannot be combined.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[inline]
@@ -750,10 +765,14 @@ impl f16x2 {
 
     /// Element-wise fused multiply-add with the out-of-bounds (OOB) modifier.
     ///
-    /// Each result is clamped to zero if either operand element is an OOB NaN, as produced by
-    /// out-of-bounds tensor accesses. `R` optionally clamps negative results to zero.
+    /// Each result is forced to `+0.0` if either operand element is an [OOB-NaN], the special NaN
+    /// produced by out-of-bounds elements of tensor accesses in the `OOB-NaN` fill mode. The test
+    /// is performed independently for each element. `R` optionally clamps negative results to
+    /// zero.
     ///
     /// Requires `sm_90`.
+    ///
+    /// [OOB-NaN]: https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-tiled-mode-oob-access
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[cfg(target_feature = "sm_90")]
@@ -768,7 +787,7 @@ impl f16x2 {
     /// Computes `2^x` of each element, approximately (`ex2.approx.f16x2`).
     ///
     /// The maximum relative error of each element is 2^-9.9 (as for `ex2.approx.f16`). Subnormal
-    /// inputs are supported.
+    /// inputs are supported. `-inf` gives `+0.0` and `+inf` gives `+inf`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-ex2>
     #[inline]
@@ -801,9 +820,11 @@ impl f16x2 {
     /// Returns the element-wise minimum with explicit modifiers.
     ///
     /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling. `X` selects whether each
-    /// result has the minimum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether each result has the minimum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline]
@@ -827,9 +848,11 @@ impl f16x2 {
     /// Returns the element-wise maximum with explicit modifiers.
     ///
     /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling. `X` selects whether each
-    /// result has the maximum absolute value of the inputs and the XOR of their signs; this
-    /// requires `sm_86`.
+    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether each result has the maximum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline]

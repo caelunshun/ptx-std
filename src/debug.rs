@@ -3,7 +3,8 @@
 
 use core::{arch::nvptx as nv, ffi::CStr, mem::MaybeUninit};
 
-/// Terminates the kernel with an abnormal error by executing the `trap` instruction.
+/// Aborts execution and generates an interrupt to the host CPU by executing the `trap`
+/// instruction.
 ///
 /// The host observes an "unspecified launch failure" and the CUDA context becomes unusable.
 ///
@@ -16,8 +17,10 @@ pub fn trap() -> ! {
 
 /// Triggers the performance monitor events whose bits are set in `MASK` (`pmevent.mask`).
 ///
-/// Bit `i` of `MASK` triggers event `i`, for events 0 through 15. The events can be counted with
-/// profiling tools.
+/// Bit `i` of `MASK` triggers event `i`, for events 0 through 15. Programmatic events can be
+/// combined with other hardware events using Boolean functions to increment one of the four
+/// performance counters; the relationship between events and counters is programmed from the host
+/// through API calls.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#miscellaneous-instructions-pmevent>
 #[inline]
@@ -35,7 +38,8 @@ const fn assert_pm_counter(n: u32) {
     );
 }
 
-/// Reads the performance monitoring counter `%pm<N>`, for `N` in `0..4`.
+/// Reads the 32-bit unsigned read-only performance monitoring counter `%pm<N>`, for `N` in
+/// `0..4`.
 ///
 /// The behavior of the counters is currently undefined by the PTX ISA.
 ///
@@ -130,6 +134,7 @@ impl<const N: usize> Default for PrintfBuffer<N> {
 }
 
 impl<const N: usize> PrintfBuffer<N> {
+    /// Creates an empty argument buffer.
     #[inline(always)]
     pub fn new() -> Self {
         Self {
@@ -158,6 +163,7 @@ impl<const N: usize> PrintfBuffer<N> {
         self.offset = offset + size;
     }
 
+    /// Calls `vprintf` with `format` and the arguments pushed so far, returning its status.
     #[inline(always)]
     pub fn call(&self, format: &CStr) -> i32 {
         // SAFETY: `format` is NUL-terminated and the buffer holds the promoted arguments in the
@@ -210,6 +216,11 @@ pub const fn count_format_args(format: &CStr) -> usize {
 ///
 /// Evaluates to the `i32` status returned by `vprintf` (the number of arguments, or a negative
 /// value on error).
+///
+/// The output is written to a fixed-size circular buffer and is delivered to the host only at
+/// certain synchronization points (e.g. kernel completion), so it may be incomplete or
+/// overwritten if the buffer fills up. CUDA processes at most 32 arguments per call; any further
+/// arguments are ignored.
 ///
 /// ```ignore
 /// printf!(c"thread %d of block %d: x = %f\n", tid, bid, x);

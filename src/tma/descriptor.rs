@@ -1,6 +1,6 @@
 // --- LLM-generated --- //
 //! Tensor maps ([`TmaDescriptor`]) and the proxy fences that publish tensor maps written to global
-//! memory to the TMA.
+//! memory to the TMA (the tensormap proxy).
 
 #[allow(unused_imports)]
 use core::arch::nvptx as nv;
@@ -24,8 +24,10 @@ use crate::modifiers::Scope;
 /// - **Constant memory.**
 /// - **Global memory.** After the tensor map has been written by the generic proxy (for example
 ///   by a copy), it must be released with `tensormap_fence_release` by the writing thread and
-///   acquired with `tensormap_fence_acquire` by each thread that is going to use it, before it
-///   is used by a TMA instruction.
+///   acquired with `tensormap_fence_acquire` by each thread that is going to use it (after
+///   synchronizing with the writing thread), before it is used by a TMA instruction. Tensor maps
+///   are accessed through the *tensormap proxy*, which is not implicitly synchronized with the
+///   generic proxy at kernel start.
 ///
 /// The contents are opaque (their layout is undocumented); this type is plain old data so that it
 /// can be passed through kernel parameters and copied around.
@@ -33,7 +35,7 @@ use crate::modifiers::Scope;
 /// In-kernel modification of tensor maps (`tensormap.replace`) is intentionally not exposed: its
 /// interaction with the hardware tensor map cache has poorly documented memory semantics.
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-maps>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-tensormap>
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable)]
 #[repr(C, align(64))]
 pub struct TmaDescriptor([u64; 16]);
@@ -47,8 +49,9 @@ impl TmaDescriptor {
 }
 
 /// Releases prior generic-proxy writes to tensor maps (such as an ordinary copy of a
-/// [`TmaDescriptor`] into global memory) so that they are visible to the tensor (async) proxy
-/// at scope `SCOPE` (`fence.proxy.tensormap::generic.release`).
+/// [`TmaDescriptor`] into global memory) so that they are visible to the tensormap proxy
+/// at scope `SCOPE`, i.e. to the threads of that scope
+/// (`fence.proxy.tensormap::generic.release.<scope>`).
 ///
 /// Threads that are going to use the modified tensor map must then execute
 /// [`tensormap_fence_acquire`].
@@ -67,9 +70,10 @@ pub fn tensormap_fence_release<const SCOPE: Scope>() {
     } in unsafe { nv::fence_proxy_tensormap_generic_release::<S>() })
 }
 
-/// Acquires the tensor map `tmap` for the tensor (async) proxy at scope `SCOPE`, so that
-/// modifications released by [`tensormap_fence_release`] are observed by subsequent TMA
-/// operations of the executing thread (`fence.proxy.tensormap::generic.acquire`).
+/// Acquires the tensor map `tmap` (all of its 128 bytes) for the tensormap proxy at scope
+/// `SCOPE`, so that modifications released by [`tensormap_fence_release`] are observed by
+/// subsequent TMA operations of the executing thread
+/// (`fence.proxy.tensormap::generic.acquire.<scope>`).
 ///
 /// Requires `sm_90`.
 ///
@@ -77,7 +81,7 @@ pub fn tensormap_fence_release<const SCOPE: Scope>() {
 ///
 /// # Safety
 ///
-/// `tmap` must reside in global memory.
+/// `tmap` must reside in global memory; otherwise the behavior is undefined.
 #[cfg(target_feature = "sm_90")]
 #[inline]
 pub unsafe fn tensormap_fence_acquire<const SCOPE: Scope>(tmap: &TmaDescriptor) {

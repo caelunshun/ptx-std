@@ -9,7 +9,14 @@ use core::{arch::nvptx as nv, marker::ConstParamTy};
 /// Allows dependent grids, launched with programmatic dependent launch, to be scheduled once all
 /// blocks of the current grid have issued this instruction or exited (`griddepcontrol.launch_dependents`).
 ///
-/// This is only a scheduling hint; it never affects the correctness of the current grid.
+/// This is only a scheduling hint for the current grid: the dependent grid may start before the
+/// current grid completes, but is not guaranteed to. Repeated invocations by the threads of a
+/// block have no additional effect beyond the first. A dependent grid that needs the results of
+/// this grid must call [`wait_for_prerequisite_grids`].
+///
+/// A release fence preceding this instruction in program order synchronizes with the start of a
+/// dependent grid if the fence has `gpu` scope and both grids are in the same memory
+/// synchronization domain, or if the fence has `sys` scope.
 ///
 /// Requires `sm_90`.
 ///
@@ -20,10 +27,12 @@ pub fn launch_dependent_grids() {
     unsafe { nv::griddepcontrol::<{ nv::GriddepcontrolAction::LaunchDependents }>() }
 }
 
-/// Waits until all prerequisite grids of the current grid have completed and their memory
-/// operations are visible (`griddepcontrol.wait`).
+/// Waits until all prerequisite grids of the current grid have completed and all of their memory
+/// operations are performed and visible to the current grid (`griddepcontrol.wait`).
 ///
-/// Does nothing if the grid was not launched with programmatic dependent launch.
+/// Must be used by a dependent grid whose prerequisite grid calls [`launch_dependent_grids`], for
+/// correct functional execution. Does nothing if the grid was not launched with programmatic
+/// dependent launch.
 ///
 /// Requires `sm_90`.
 ///
@@ -47,7 +56,9 @@ pub fn exit() -> ! {
 /// `first_cta_id`.
 ///
 /// The response must live in 16-byte aligned shared memory of the block when passed to
-/// `try_cancel_launch`. A zeroed response is never reported as canceled.
+/// `try_cancel_launch`, and must be read back from shared memory (after the completion of the
+/// request has been observed on the mbarrier) before it is decoded. A zeroed response is never
+/// reported as canceled.
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 #[repr(C, align(16))]
 pub struct CancelResponse {
@@ -73,7 +84,8 @@ impl CancelResponse {
     }
 
     /// Returns the block index, within the grid, of the first block of the canceled cluster, or
-    /// `None` if the request did not cancel a cluster.
+    /// `None` if the request did not cancel a cluster. No other successful response of the same
+    /// grid contains the same block index.
     ///
     /// A kernel that cancels a pending cluster typically takes over the work of that cluster.
     ///
@@ -103,7 +115,8 @@ pub enum CancelDelivery {
     Block,
     /// The response is written to all blocks of the cluster (`.multicast::cluster::all`), each at
     /// the same offset within its shared memory as `response`, and the mbarrier of each block at
-    /// the same offset as `barrier` is signaled.
+    /// the same offset as `barrier` is signaled. The writes are weak async-proxy writes.
+    /// Undefined behavior if any block of the cluster has exited.
     ///
     /// Requires the `sm_100f`, `sm_101f`, `sm_110f` or `sm_120f` family.
     Cluster,
@@ -113,9 +126,10 @@ pub enum CancelDelivery {
 /// (`clusterlaunchcontrol.try_cancel.async`).
 ///
 /// The 16-byte response is written to `response` through the async proxy, completing a 16-byte
-/// transaction on `barrier`. Once the corresponding phase of `barrier` has completed, `response`
-/// can be read and decoded with [`CancelResponse::is_canceled`] and
-/// [`CancelResponse::first_cta_id`].
+/// transaction on `barrier` (at cluster scope). Once the corresponding phase of `barrier` has
+/// completed, `response` can be read and decoded with [`CancelResponse::is_canceled`] and
+/// [`CancelResponse::first_cta_id`]. The request atomically cancels a cluster that has not
+/// started running yet, if there is one.
 ///
 /// Requires `sm_100`; [`CancelDelivery::Cluster`] additionally requires the `sm_100f`,
 /// `sm_101f`, `sm_110f` or `sm_120f` family.
@@ -129,7 +143,12 @@ pub enum CancelDelivery {
 /// * `barrier` must be an initialized mbarrier in shared memory of the executing block, expecting
 ///   a 16-byte transaction in its current phase (e.g. by an `arrive.expect_tx` of 16 bytes).
 /// * With [`CancelDelivery::Cluster`], the same holds for the corresponding locations in every
-///   block of the cluster.
+///   block of the cluster, and no block of the cluster may have exited.
+/// * Once the executing block has observed a request to be unsuccessful (see
+///   [`CancelResponse::is_canceled`]), it must not issue another request.
+/// * Before reusing `response` for a subsequent request, the generic-proxy reads of the previous
+///   response must be ordered before the async-proxy write (e.g. with an async-proxy fence and a
+///   barrier, as in the PTX documentation example).
 #[cfg(target_feature = "sm_100")]
 #[inline]
 pub unsafe fn try_cancel_launch<const DELIVERY: CancelDelivery>(
@@ -160,7 +179,9 @@ pub unsafe fn try_cancel_launch<const DELIVERY: CancelDelivery>(
 /// additional registers from the pool released by other warps (`setmaxnreg.inc`).
 ///
 /// `COUNT` must be a multiple of 8 in `24..=256`. The warp blocks until enough registers are
-/// available.
+/// available in the CTA's register pool. The contents of the newly acquired registers are
+/// undefined; they must be initialized before use. This is only a hint, and may have no effect
+/// if the kernel was not launched with a valid maximum register count.
 ///
 /// Requires `sm_90a`, or the `sm_100f`, `sm_101f`, `sm_110f` or `sm_120f` family.
 ///
@@ -169,7 +190,9 @@ pub unsafe fn try_cancel_launch<const DELIVERY: CancelDelivery>(
 /// # Safety
 ///
 /// All threads of the executing warp must execute this instruction together, and all warps of the
-/// executing warpgroup must execute the same `setmaxnreg` with the same `COUNT`.
+/// executing warpgroup must execute the same `setmaxnreg` with the same `COUNT`; the warps of
+/// the warpgroup must synchronize explicitly before executing any further `setmaxnreg`. The
+/// number of registers currently owned by the warp must be at most `COUNT`.
 #[cfg(any(
     target_feature = "sm_90a",
     target_feature = "sm_100f",
@@ -193,7 +216,8 @@ pub unsafe fn increase_max_registers<const COUNT: u32>() {
 ///
 /// `COUNT` must be a multiple of 8 in `24..=256`. The warp's code after this instruction must not
 /// use more than `COUNT` registers per thread; the compiler takes care of this when allocating
-/// registers.
+/// registers. The released registers are added to the CTA's register pool. This is only a hint,
+/// and may have no effect if the kernel was not launched with a valid maximum register count.
 ///
 /// Requires `sm_90a`, or the `sm_100f`, `sm_101f`, `sm_110f` or `sm_120f` family.
 ///
@@ -202,7 +226,9 @@ pub unsafe fn increase_max_registers<const COUNT: u32>() {
 /// # Safety
 ///
 /// All threads of the executing warp must execute this instruction together, and all warps of the
-/// executing warpgroup must execute the same `setmaxnreg` with the same `COUNT`.
+/// executing warpgroup must execute the same `setmaxnreg` with the same `COUNT`; the warps of
+/// the warpgroup must synchronize explicitly before executing any further `setmaxnreg`. The
+/// number of registers currently owned by the warp must be at least `COUNT`.
 #[cfg(any(
     target_feature = "sm_90a",
     target_feature = "sm_100f",

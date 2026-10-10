@@ -60,8 +60,8 @@ macro_rules! acquire_variant {
 
 /// A memory barrier object (`mbarrier`) residing in shared memory.
 ///
-/// An mbarrier is an 8-byte, 8-byte-aligned object that tracks a sequence of *phases*. Each phase
-/// completes once both
+/// An mbarrier is an 8-byte, 8-byte-aligned opaque object (`.b64`, `.layout::v0`) that tracks a
+/// sequence of *phases*. Each phase completes once both
 /// - its *pending arrival count* has reached zero (initially the *expected arrival count* passed
 ///   to [`init`](Self::init), decremented by every arrive-on operation), and
 /// - its *transaction count* (*tx-count*) is zero (incremented by `expect_tx`,
@@ -69,7 +69,8 @@ macro_rules! acquire_variant {
 ///   operation that is tracked by the mbarrier, e.g. a TMA copy).
 ///
 /// When a phase completes, the barrier moves on to the next phase and the pending arrival count is
-/// reset to the expected arrival count. Threads wait for a phase either through the
+/// reset to the expected arrival count. Starting with `sm_90`, the tx-count is used to track the
+/// completion of asynchronous memory operations. Threads wait for a phase either through the
 /// [`ArrivalToken`] returned by an arrive operation or through the [`PhaseParity`] of the phase;
 /// see [`Phase`].
 ///
@@ -84,7 +85,9 @@ macro_rules! acquire_variant {
 ///   barrier, and for access from other CTAs `fence_init` followed by a
 ///   cluster barrier),
 /// - the pending arrival count and the tx-count stay within their ranges (the pending count must
-///   not underflow, and the tx-count must stay within `[-(2^20 - 1), 2^20 - 1]`).
+///   not underflow, and the tx-count must stay within `[-(2^20 - 1), 2^20 - 1]`),
+/// - for each phase, at least one wait operation that returns `true` for that phase is performed
+///   before any arrive-on operation of the subsequent phase.
 ///
 /// The `# Safety` sections of the individual operations only list requirements in addition to
 /// these.
@@ -95,8 +98,9 @@ pub struct MBarrier(UnsafeCell<MaybeUninit<u64>>);
 // SAFETY: mbarrier operations are performed atomically by the hardware.
 unsafe impl Sync for MBarrier {}
 
-/// Opaque state of an [`MBarrier`] captured by an arrive operation, identifying the phase that the
-/// arrive-on operation contributed to.
+/// Opaque state of an [`MBarrier`] captured by an arrive operation: it identifies the phase of the
+/// barrier prior to the arrive-on operation, i.e. the phase that the arrive-on operation
+/// contributed to. Its contents are implementation specific.
 ///
 /// Pass it to the wait operations of the barrier (e.g. [`MBarrier::wait`]) to wait for that phase
 /// to complete. It is only valid for waiting during the phase it was returned for and the
@@ -106,8 +110,8 @@ unsafe impl Sync for MBarrier {}
 pub struct ArrivalToken(u64);
 
 impl ArrivalToken {
-    /// Returns the pending arrival count of the barrier at the time of the arrive-on operation
-    /// that returned this token.
+    /// Returns the pending arrival count of the barrier immediately prior to the arrive-on
+    /// operation that returned this token (`mbarrier.pending_count`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-pending-count>
     ///
@@ -126,7 +130,7 @@ impl ArrivalToken {
 /// A freshly initialized barrier is in phase 0 ([`PhaseParity::Even`]). Waiting on a parity waits
 /// for the completion of the current phase if it has that parity, or tests the completion of the
 /// immediately preceding phase otherwise; the typical usage is to flip the parity (with `!`) after
-/// each successful wait.
+/// each successful wait. This requires tracking the phase of the barrier throughout its lifetime.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum PhaseParity {
@@ -287,7 +291,8 @@ impl MBarrier {
     }
 
     /// Initializes the barrier with the expected arrival count `expected_arrivals`, entering
-    /// phase 0 with a zero tx-count.
+    /// phase 0 with a zero tx-count (`mbarrier.init`). Both the expected and the pending arrival
+    /// count are set to `expected_arrivals`.
     ///
     /// Typically executed by a single thread, followed by `fence_init` (if
     /// the barrier is accessed through the async proxy or by other CTAs of the cluster) and a
@@ -297,9 +302,10 @@ impl MBarrier {
     ///
     /// # Safety
     ///
-    /// The barrier must be located in shared memory, and must not currently be in use by
-    /// other threads (it is either uninitialized or has been invalidated). `expected_arrivals`
-    /// must be in `1..=2^20 - 1`.
+    /// The barrier must be located in shared memory of the executing CTA, and must not currently
+    /// be in use by other threads: initializing a memory location that contains a valid mbarrier
+    /// is undefined behavior, so it must be uninitialized or have been invalidated with
+    /// [`inval`](Self::inval). `expected_arrivals` must be in `1..=2^20 - 1`.
     #[inline]
     pub unsafe fn init(&self, expected_arrivals: u32) {
         unsafe {
@@ -307,8 +313,9 @@ impl MBarrier {
         }
     }
 
-    /// Invalidates the barrier, after which its memory can be used for other purposes or the
-    /// barrier can be re-initialized with [`init`](Self::init).
+    /// Invalidates the barrier (`mbarrier.inval`), after which its memory can be used for other
+    /// purposes or the barrier can be re-initialized with [`init`](Self::init). A barrier must be
+    /// invalidated before its memory is used for any other purpose, including another mbarrier.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-inval>
     ///
@@ -321,15 +328,15 @@ impl MBarrier {
         unsafe { nv::mbarrier_inval::<{ nv::StateSpace::SharedCta }>(self.as_ptr()) }
     }
 
-    /// Orders prior [`init`](Self::init) operations of this thread against subsequent operations
-    /// of the whole cluster, making the initialized barriers visible to the async proxy and to
-    /// other CTAs in the cluster (`fence.mbarrier_init.release.cluster`).
+    /// Release fence at cluster scope that applies to the prior [`init`](Self::init) operations
+    /// executed by this thread on mbarriers in its CTA's shared memory
+    /// (`fence.mbarrier_init.release.cluster`).
     ///
-    /// Needed after initializing a barrier that is used by TMA operations or by threads of other
-    /// CTAs, followed by a cluster barrier (see
+    /// Needed after initializing a barrier that is accessed by threads of other CTAs, before the
+    /// barrier is published with a cluster barrier (see
     /// [`cluster::barrier_sync`](crate::cluster::barrier_sync)).
     ///
-    /// Requires `sm_90`.
+    /// Requires `sm_90` and PTX ISA 8.0.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-membar>
     #[cfg(target_feature = "sm_90")]
@@ -339,18 +346,20 @@ impl MBarrier {
     }
 
     /// Makes the barrier track the completion of all prior `cp.async` operations of the executing
-    /// thread: once they complete, an arrive-on operation is triggered on the barrier.
+    /// thread (`cp.async.mbarrier.arrive`): once they complete, an arrive-on operation is
+    /// triggered on the barrier, asynchronously to the execution of this call.
     ///
     /// The pending arrival count of the barrier is incremented by one before the arrive-on
     /// operation is triggered, so the net effect on the pending count is zero. Use
     /// [`cp_async_arrive_no_inc`](Self::cp_async_arrive_no_inc) to account for the arrival in the
     /// expected arrival count instead.
     ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-mbarrier-arrive>
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-cp-async-mbarrier-arrive>
     ///
     /// # Safety
     ///
-    /// See the [safety contract](MBarrier#safety-contract-of-all-operations).
+    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The pending arrival
+    /// count after the increment must not exceed its maximum (`2^20 - 1`).
     #[inline]
     pub unsafe fn cp_async_arrive(&self) {
         unsafe {
@@ -364,7 +373,7 @@ impl MBarrier {
     /// incremented (`.noinc`): the triggered arrive-on operation decrements it, so the expected
     /// arrival count passed to [`init`](Self::init) must include the arrival of this operation.
     ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-mbarrier-arrive>
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-cp-async-mbarrier-arrive>
     ///
     /// # Safety
     ///
@@ -381,7 +390,8 @@ impl MBarrier {
     // ---- arrive ----
 
     /// Performs an arrive-on operation, decrementing the pending arrival count by one, with
-    /// release semantics at CTA scope. Returns a token for the phase arrived at.
+    /// release semantics at CTA scope (`mbarrier.arrive`). Returns a token for the phase arrived
+    /// at.
     ///
     /// If this causes the pending count to reach zero (and the tx-count is zero), the phase
     /// completes.
@@ -397,7 +407,9 @@ impl MBarrier {
     }
 
     /// Performs an arrive-on operation that decrements the pending arrival count by `count`,
-    /// which must not complete the current phase.
+    /// which must not complete the current phase, with release semantics at CTA scope
+    /// (`mbarrier.arrive.noComplete`). Returns a token for the phase arrived at, which is the
+    /// only kind of token that supports [`ArrivalToken::pending_count`].
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-arrive>
     ///
@@ -413,16 +425,16 @@ impl MBarrier {
         })
     }
 
-    /// Decrements the expected arrival count of the current and all subsequent phases by one,
-    /// and performs an arrive-on operation (release, CTA scope). Used by a thread that leaves
-    /// the set of participating threads.
+    /// Decrements the expected arrival count (for all subsequent phases) by one, and performs an
+    /// arrive-on operation (release, CTA scope) (`mbarrier.arrive_drop`). Used by a thread that
+    /// exits or opts out of participating in the barrier.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-arrive-drop>
     ///
     /// # Safety
     ///
-    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The expected arrival
-    /// count must not drop below zero.
+    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The decrement must
+    /// not cause the expected arrival count to become zero.
     #[inline]
     pub unsafe fn arrive_drop(&self) -> ArrivalToken {
         ArrivalToken(unsafe {
@@ -431,13 +443,15 @@ impl MBarrier {
     }
 
     /// Like [`arrive_drop`](Self::arrive_drop), but decrements the expected arrival count and
-    /// performs the arrive-on operation with `count`, which must not complete the current phase.
+    /// performs the arrive-on operation with `count`, which must not complete the current phase
+    /// (`mbarrier.arrive_drop.noComplete`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-arrive-drop>
     ///
     /// # Safety
     ///
-    /// The operation must not cause the barrier to complete its current phase. See also the
+    /// The operation must not cause the barrier to complete its current phase, and must not
+    /// cause the expected arrival count to become zero. See also the
     /// [safety contract](MBarrier#safety-contract-of-all-operations).
     #[inline]
     pub unsafe fn arrive_drop_no_complete(&self, count: u32) -> ArrivalToken {
@@ -450,7 +464,8 @@ impl MBarrier {
     }
 
     /// Performs an arrive-on operation that decrements the pending arrival count by `count`, at
-    /// scope `SCOPE` with memory ordering `SEM`.
+    /// scope `SCOPE` with memory ordering `SEM` (`mbarrier.arrive.sem.scope`). Returns a token
+    /// for the phase arrived at.
     ///
     /// `SCOPE` must be [`Scope::Cta`] or [`Scope::Cluster`], and `SEM` must be
     /// [`MemoryOrdering::Release`] or [`MemoryOrdering::Relaxed`].
@@ -475,7 +490,8 @@ impl MBarrier {
     }
 
     /// Like [`arrive_scoped`](Self::arrive_scoped), but additionally decrements the expected
-    /// arrival count of the current and all subsequent phases by `count`.
+    /// arrival count (for all subsequent phases) by `count`
+    /// (`mbarrier.arrive_drop.sem.scope`).
     ///
     /// Requires `sm_90`.
     ///
@@ -483,8 +499,8 @@ impl MBarrier {
     ///
     /// # Safety
     ///
-    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The expected arrival
-    /// count must not drop below zero.
+    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The decrement must
+    /// not cause the expected arrival count to become zero.
     #[cfg(target_feature = "sm_90")]
     #[inline]
     pub unsafe fn arrive_drop_scoped<const SCOPE: Scope, const SEM: MemoryOrdering>(
@@ -497,8 +513,9 @@ impl MBarrier {
         }))
     }
 
-    /// Performs an expect-tx operation with `tx_bytes` followed by an arrive-on operation
-    /// (release semantics, CTA scope), as one atomic operation.
+    /// Performs an expect-tx operation with `tx_bytes` followed by an arrive-on operation with
+    /// count 1 (release semantics, CTA scope), with a single instruction
+    /// (`mbarrier.arrive.expect_tx`).
     ///
     /// This is the usual way for the thread that issues a bulk async copy to register the number
     /// of bytes the copy will deliver and to arrive on the barrier.
@@ -519,7 +536,7 @@ impl MBarrier {
     }
 
     /// Like [`arrive_expect_tx`](Self::arrive_expect_tx), at scope `SCOPE` with memory ordering
-    /// `SEM`.
+    /// `SEM` (`mbarrier.arrive.expect_tx.sem.scope`).
     ///
     /// `SCOPE` must be [`Scope::Cta`] or [`Scope::Cluster`], and `SEM` must be
     /// [`MemoryOrdering::Release`] or [`MemoryOrdering::Relaxed`].
@@ -544,7 +561,8 @@ impl MBarrier {
     }
 
     /// Like [`arrive_expect_tx_scoped`](Self::arrive_expect_tx_scoped), but additionally
-    /// decrements the expected arrival count of the current and all subsequent phases by one.
+    /// decrements the expected arrival count (for all subsequent phases) by one
+    /// (`mbarrier.arrive_drop.expect_tx.sem.scope`).
     ///
     /// Requires `sm_90`.
     ///
@@ -552,8 +570,8 @@ impl MBarrier {
     ///
     /// # Safety
     ///
-    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The expected arrival
-    /// count must not drop below zero.
+    /// See the [safety contract](MBarrier#safety-contract-of-all-operations). The decrement must
+    /// not cause the expected arrival count to become zero.
     #[cfg(target_feature = "sm_90")]
     #[inline]
     pub unsafe fn arrive_drop_expect_tx_scoped<const SCOPE: Scope, const SEM: MemoryOrdering>(
@@ -570,7 +588,8 @@ impl MBarrier {
 
     /// Increments the tx-count of the current phase by `tx_bytes`, so that the phase cannot
     /// complete before the expected number of bytes has been delivered by asynchronous
-    /// operations tracked by this barrier (CTA scope).
+    /// operations tracked by this barrier (`mbarrier.expect_tx.relaxed.cta`). The operation has
+    /// relaxed semantics: it provides no memory ordering or visibility guarantees.
     ///
     /// Requires `sm_90`.
     ///
@@ -586,7 +605,7 @@ impl MBarrier {
     }
 
     /// Like [`expect_tx`](Self::expect_tx), at scope `SCOPE` ([`Scope::Cta`] or
-    /// [`Scope::Cluster`]).
+    /// [`Scope::Cluster`]) (`mbarrier.expect_tx.relaxed.scope`).
     ///
     /// Requires `sm_90`.
     ///
@@ -613,9 +632,10 @@ impl MBarrier {
         })
     }
 
-    /// Decrements the tx-count of the current phase by `tx_bytes` (CTA scope), as if
-    /// an asynchronous operation delivering that many bytes had completed. If the pending
-    /// arrival count and the tx-count both reach zero, the phase completes.
+    /// Decrements the tx-count of the current phase by `tx_bytes`, as if an asynchronous
+    /// operation delivering that many bytes had completed (`mbarrier.complete_tx.relaxed.cta`).
+    /// If the pending arrival count and the tx-count both reach zero, the phase completes. The
+    /// operation has relaxed semantics: it provides no memory ordering or visibility guarantees.
     ///
     /// Requires `sm_90`.
     ///
@@ -631,7 +651,7 @@ impl MBarrier {
     }
 
     /// Like [`complete_tx`](Self::complete_tx), at scope `SCOPE` ([`Scope::Cta`] or
-    /// [`Scope::Cluster`]).
+    /// [`Scope::Cluster`]) (`mbarrier.complete_tx.relaxed.scope`).
     ///
     /// Requires `sm_90`.
     ///
@@ -660,8 +680,9 @@ impl MBarrier {
 
     // ---- operations on barriers in other CTAs of the cluster ----
 
-    /// Maps this barrier to the corresponding barrier in the shared memory of the CTA with rank
-    /// `cta_rank` in the cluster, for use with the `*_remote` operations.
+    /// Maps this barrier to the corresponding barrier (at the same CTA-relative offset) in the
+    /// shared memory of the CTA with rank `cta_rank` in the cluster, for use with the `*_remote`
+    /// operations. The returned pointer is a generic address in the `.shared::cluster` window.
     ///
     /// See [`cluster::map_to_cta`](crate::cluster::map_to_cta).
     ///
@@ -679,8 +700,9 @@ impl MBarrier {
 
     /// Performs an arrive-on operation that decrements the pending arrival count by `count` on
     /// the barrier `barrier` in the shared memory of a CTA of the cluster (possibly the
-    /// executing CTA), at scope `SCOPE` with memory ordering `SEM`. The barrier state is not
-    /// returned.
+    /// executing CTA), at scope `SCOPE` with memory ordering `SEM`
+    /// (`mbarrier.arrive.sem.scope.shared::cluster`). The barrier state cannot be returned for a
+    /// `.shared::cluster` barrier, so no token is returned.
     ///
     /// `SCOPE` must be [`Scope::Cta`] or [`Scope::Cluster`], and `SEM` must be
     /// [`MemoryOrdering::Release`] or [`MemoryOrdering::Relaxed`].
@@ -691,8 +713,9 @@ impl MBarrier {
     ///
     /// # Safety
     ///
-    /// `barrier` must point to an mbarrier in the shared memory of a CTA of the executing
-    /// cluster, e.g. obtained from [`map_to_cta_rank`](Self::map_to_cta_rank). See also the
+    /// `barrier` must be a generic address in the `.shared::cluster` window pointing to an
+    /// mbarrier in the shared memory of a CTA of the executing cluster, e.g. obtained from
+    /// [`map_to_cta_rank`](Self::map_to_cta_rank). See also the
     /// [safety contract](MBarrier#safety-contract-of-all-operations).
     #[cfg(target_feature = "sm_90")]
     #[inline]
@@ -706,7 +729,8 @@ impl MBarrier {
     }
 
     /// Like [`arrive_remote`](Self::arrive_remote), but additionally decrements the expected
-    /// arrival count of the current and all subsequent phases by `count`.
+    /// arrival count (for all subsequent phases) by `count`
+    /// (`mbarrier.arrive_drop.sem.scope.shared::cluster`).
     ///
     /// Requires `sm_90`.
     ///
@@ -714,8 +738,8 @@ impl MBarrier {
     ///
     /// # Safety
     ///
-    /// See [`arrive_remote`](Self::arrive_remote). The expected arrival count must not drop below
-    /// zero.
+    /// See [`arrive_remote`](Self::arrive_remote). The decrement must not cause the expected
+    /// arrival count to become zero.
     #[cfg(target_feature = "sm_90")]
     #[inline]
     pub unsafe fn arrive_drop_remote<const SCOPE: Scope, const SEM: MemoryOrdering>(
@@ -727,8 +751,9 @@ impl MBarrier {
         })
     }
 
-    /// Performs an expect-tx operation with `tx_bytes` followed by an arrive-on operation on the
-    /// barrier `barrier` in the shared memory of a CTA of the cluster.
+    /// Performs an expect-tx operation with `tx_bytes` followed by an arrive-on operation with
+    /// count 1 on the barrier `barrier` in the shared memory of a CTA of the cluster, at scope
+    /// `SCOPE` with memory ordering `SEM` (`mbarrier.arrive.expect_tx.sem.scope.shared::cluster`).
     ///
     /// Requires `sm_90`.
     ///
@@ -749,7 +774,8 @@ impl MBarrier {
     }
 
     /// Like [`arrive_expect_tx_remote`](Self::arrive_expect_tx_remote), but additionally
-    /// decrements the expected arrival count of the current and all subsequent phases by one.
+    /// decrements the expected arrival count (for all subsequent phases) by one
+    /// (`mbarrier.arrive_drop.expect_tx.sem.scope.shared::cluster`).
     ///
     /// Requires `sm_90`.
     ///
@@ -757,8 +783,8 @@ impl MBarrier {
     ///
     /// # Safety
     ///
-    /// See [`arrive_remote`](Self::arrive_remote). The expected arrival count must not drop below
-    /// zero.
+    /// See [`arrive_remote`](Self::arrive_remote). The decrement must not cause the expected
+    /// arrival count to become zero.
     #[cfg(target_feature = "sm_90")]
     #[inline]
     pub unsafe fn arrive_drop_expect_tx_remote<const SCOPE: Scope, const SEM: MemoryOrdering>(
@@ -771,7 +797,8 @@ impl MBarrier {
     }
 
     /// Performs an expect-tx operation with `tx_bytes` on the barrier `barrier` in the shared
-    /// memory of a CTA of the cluster, at scope `SCOPE` ([`Scope::Cta`] or [`Scope::Cluster`]).
+    /// memory of a CTA of the cluster, at scope `SCOPE` ([`Scope::Cta`] or [`Scope::Cluster`])
+    /// (`mbarrier.expect_tx.relaxed.scope.shared::cluster`), with relaxed semantics.
     ///
     /// Requires `sm_90`.
     ///
@@ -798,7 +825,8 @@ impl MBarrier {
     }
 
     /// Performs a complete-tx operation with `tx_bytes` on the barrier `barrier` in the shared
-    /// memory of a CTA of the cluster, at scope `SCOPE` ([`Scope::Cta`] or [`Scope::Cluster`]).
+    /// memory of a CTA of the cluster, at scope `SCOPE` ([`Scope::Cta`] or [`Scope::Cluster`])
+    /// (`mbarrier.complete_tx.relaxed.scope.shared::cluster`), with relaxed semantics.
     ///
     /// Requires `sm_90`.
     ///
@@ -827,14 +855,25 @@ impl MBarrier {
     // ---- waiting ----
 
     /// Tests, without blocking, whether the phase identified by `phase` (an [`ArrivalToken`] or
-    /// a [`PhaseParity`]) has completed, with acquire semantics at CTA scope.
+    /// a [`PhaseParity`]) has completed, with acquire semantics at CTA scope
+    /// (`mbarrier.test_wait`).
+    ///
+    /// When this returns `true`, the executing thread observes all memory accesses (including
+    /// completed `cp.async` and bulk async operations tracked by the barrier) that the
+    /// participating threads requested before their release arrive-on operations in the completed
+    /// phase, and its subsequent memory accesses are ordered after the wait. No such guarantee
+    /// holds for the executing thread's own accesses between its arrive and the wait.
+    ///
+    /// Requires `sm_80`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-test-wait-try-wait>
     ///
     /// # Safety
     ///
-    /// `phase` must identify the current phase or the immediately preceding phase of the barrier.
-    /// See also the [safety contract](MBarrier#safety-contract-of-all-operations).
+    /// `phase` must identify the current phase or the immediately preceding phase of the barrier;
+    /// an [`ArrivalToken`] must have been returned by an arrive operation on the same barrier
+    /// during the current or the immediately preceding phase. See also the
+    /// [safety contract](MBarrier#safety-contract-of-all-operations).
     #[inline]
     pub unsafe fn test_wait(&self, phase: impl Phase) -> bool {
         unsafe { phase.test_wait::<{ Scope::Cta }, { MemoryOrdering::Acquire }>(self.as_ptr()) }
@@ -843,8 +882,9 @@ impl MBarrier {
     /// Like [`test_wait`](Self::test_wait), at scope `SCOPE` with memory ordering `SEM`.
     ///
     /// `SCOPE` must be [`Scope::Cta`] or [`Scope::Cluster`], and `SEM` must be
-    /// [`MemoryOrdering::Acquire`] or [`MemoryOrdering::Relaxed`]. Everything except
-    /// CTA-scope acquire requires `sm_90`.
+    /// [`MemoryOrdering::Acquire`] or [`MemoryOrdering::Relaxed`]. A relaxed wait provides no
+    /// memory ordering or visibility guarantees. Everything except CTA-scope acquire requires
+    /// `sm_90`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-test-wait-try-wait>
     ///
@@ -867,11 +907,13 @@ impl MBarrier {
     }
 
     /// Waits for the phase identified by `phase` (an [`ArrivalToken`] or a [`PhaseParity`]) to
-    /// complete, with acquire semantics at CTA scope. Returns `true` if the phase completed, and
-    /// `false` if the wait timed out (after a system-dependent time limit), in which case it can
-    /// simply be retried.
+    /// complete, with acquire semantics at CTA scope (`mbarrier.try_wait`). Returns `true` if the
+    /// phase completed, and `false` if the wait timed out (after a system-dependent time limit),
+    /// in which case it can simply be retried.
     ///
-    /// The thread may be suspended while waiting. See [`wait`](Self::wait) to wait in a loop.
+    /// The thread may be suspended while waiting; it resumes when the phase completes or before,
+    /// after the time limit. See [`wait`](Self::wait) to wait in a loop. The memory ordering of a
+    /// successful wait is as for [`test_wait`](Self::test_wait).
     ///
     /// Requires `sm_90`.
     ///
@@ -907,8 +949,8 @@ impl MBarrier {
         unsafe { phase.try_wait::<SCOPE, SEM>(self.as_ptr()) }
     }
 
-    /// Like [`try_wait`](Self::try_wait), but the thread is suspended for at most
-    /// `suspend_time_hint_ns` nanoseconds (a hint) instead of a system-dependent time limit.
+    /// Like [`try_wait`](Self::try_wait), but `suspend_time_hint_ns` (in nanoseconds) is used as
+    /// the time limit for suspending the thread instead of the system-dependent limit.
     ///
     /// Requires `sm_90`.
     ///
@@ -957,6 +999,8 @@ impl MBarrier {
     /// Loops on `try_wait` (or on [`test_wait`](Self::test_wait) before
     /// `sm_90`).
     ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-test-wait-try-wait>
+    ///
     /// # Safety
     ///
     /// `phase` must identify the current phase or the immediately preceding phase of the barrier,
@@ -976,6 +1020,8 @@ impl MBarrier {
     /// [`MemoryOrdering::Acquire`] or [`MemoryOrdering::Relaxed`].
     ///
     /// Requires `sm_90`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier-test-wait-try-wait>
     ///
     /// # Safety
     ///

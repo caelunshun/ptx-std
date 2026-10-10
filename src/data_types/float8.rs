@@ -78,8 +78,9 @@ narrow_x4! {
 
 /// Two packed FP8 E5M2 values (1 sign, 5 exponent and 2 mantissa bits; exponent bias 15).
 ///
-/// The format follows IEEE 754 conventions (infinities and NaNs); the largest finite magnitude is
-/// 57344. Element 0 occupies the low 8 bits.
+/// The format follows IEEE 754 conventions, with the same encodings of infinity (`0x7c`/`0xfc`)
+/// and NaN as the upper byte of an IEEE `binary16` value; the largest finite magnitude is 57344.
+/// Element 0 occupies the low 8 bits.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#alternate-floating-point-data-formats>
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -142,8 +143,12 @@ narrow_x4! {
 /// Two packed unsigned E8M0 (`ue8m0`) scale factors.
 ///
 /// Each element has 8 exponent bits and no sign or mantissa bits, so it represents the power of two
-/// `2^(bits - 127)`; `0xff` is NaN. These are the scale factors of the block-scaled narrow formats
-/// and of the `to_bf16x2_scaled` conversions. Element 0 occupies the low 8 bits.
+/// `2^(bits - 127)` (from `2^-127` to `2^127`); `0xff` is NaN. The format has no infinity, zero or
+/// negative values. These are the scale factors of the block-scaled narrow formats and of the
+/// `to_bf16x2_scaled` conversions. Element 0 occupies the low 8 bits.
+///
+/// The conversions to and from other formats require `sm_100f`, `sm_101f`, `sm_110f` or
+/// `sm_120f`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#alternate-floating-point-data-formats>
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -174,9 +179,12 @@ impl f8e8m0x2 {
 impl f8e8m0x2 {
     /// Converts two `f32` values to a packed pair of `ue8m0` scale factors.
     ///
-    /// `x[0]` becomes element 0 and `x[1]` becomes element 1. `RND` must be
-    /// [`Rounding::TowardZero`] or [`Rounding::Up`]. With [`Overflow::SaturateFinite`],
-    /// out-of-range values are clamped to the largest finite value (`.satfinite`).
+    /// `x[0]` becomes element 0 and `x[1]` becomes element 1. Since the format only holds powers
+    /// of two, `RND` selects rounding to a power of two toward zero ([`Rounding::TowardZero`]) or
+    /// toward positive infinity ([`Rounding::Up`]); no other mode is supported. NaN becomes NaN.
+    /// With [`Overflow::SaturateFinite`], out-of-range values are clamped to the largest finite
+    /// value `2^127` (`.satfinite`, always positive as the format is unsigned); without it,
+    /// the PTX ISA does not define the result of an overflow as the format has no infinity.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -197,9 +205,13 @@ impl f8e8m0x2 {
 
     /// Converts a packed pair of `bf16` values to a packed pair of `ue8m0` scale factors.
     ///
-    /// Element `i` of the result is converted from element `i` of `x`. `RND` must be
-    /// [`Rounding::TowardZero`] or [`Rounding::Up`]. With [`Overflow::SaturateFinite`],
-    /// out-of-range values are clamped to the largest finite value (`.satfinite`).
+    /// Element `i` of the result is converted from element `i` of `x`. Since the format only
+    /// holds powers of two, `RND` selects rounding to a power of two toward zero
+    /// ([`Rounding::TowardZero`]) or toward positive infinity ([`Rounding::Up`]); no other mode is
+    /// supported. NaN becomes NaN. With [`Overflow::SaturateFinite`], out-of-range values are
+    /// clamped to the largest finite value `2^127` (`.satfinite`, always positive as the format is
+    /// unsigned); without it, the PTX ISA does not define the result of an overflow as the format
+    /// has no infinity.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -220,7 +232,8 @@ impl f8e8m0x2 {
 
     /// Converts the packed pair of `ue8m0` scale factors to a packed pair of `bf16` values.
     ///
-    /// Element `i` of the result is converted from element `i` of `self`.
+    /// Element `i` of the result is converted from element `i` of `self`. The conversion is
+    /// exact; `0xff` becomes NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]
@@ -303,7 +316,8 @@ impl f8e8m0x4 {
 
     /// Converts the four `ue8m0` scale factors to `bf16` values, returned as two packed pairs.
     ///
-    /// Element `i` of `self` becomes element `i % 2` of the result at index `i / 2`.
+    /// Element `i` of `self` becomes element `i % 2` of the result at index `i / 2`. The
+    /// conversion is exact; `0xff` becomes NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     #[inline]

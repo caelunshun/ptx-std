@@ -53,11 +53,17 @@ pub enum Swizzle {
 /// 16 bytes, and the descriptor encodes them as `(x & 0x3FFFF) >> 4` (14 bits, covering at most
 /// 256 KiB of shared memory).
 ///
+/// The layout of the descriptor is: the start address in bits 0..15, the leading dimension byte
+/// offset in bits 16..31, the stride dimension byte offset in bits 32..46, the fixed constant
+/// `0b001` in bits 46..49, the base offset in bits 49..52, the leading dimension stride mode in
+/// bit 52, and the [`Swizzle`] mode in bits 61..64. All other bits are zero.
+///
 /// # Strides
 ///
-/// A matrix is composed of 8x2 (K-major) or 8x8 (M / N-major) tiles of 128-bit units that are
-/// swizzled as a whole. The *leading dimension byte offset* (LBO) and *stride dimension byte offset*
-/// (SBO) locate the tiles relative to each other:
+/// A matrix is composed of *swizzle atoms* of 128-bit units that are swizzled as a whole: 8 rows by
+/// (swizzle bytes / 16) columns for K-major matrices, (swizzle bytes / 16) rows by 8 columns for
+/// M / N-major matrices, and 8x1 / 1x8 without swizzling. The *leading dimension byte offset* (LBO)
+/// and *stride dimension byte offset* (SBO) locate the atoms relative to each other:
 ///
 /// | Major-ness | Swizzling | LBO | SBO |
 /// |---|---|---|---|
@@ -66,9 +72,10 @@ pub enum Swizzle {
 /// | M / N-major | none | Stride from the first 8 columns to the next 8 columns | Offset from the first row to the next row |
 /// | M / N-major | any | Stride from the first (swizzle bytes / 16) rows to the next (swizzle bytes / 16) rows | Offset from the first 8 columns to the next 8 columns |
 ///
-/// Here, "row" and "column" refer to the 128-bit-normalized matrix in which the major dimension
-/// (K for K-major, M / N otherwise) runs along the rows of a tile. For example, the canonical
-/// layouts in CuTe notation, with `T` the number of elements in 128 bits, are:
+/// Here, "row" and "column" refer to the matrix normalized to 128-bit units along its contiguous
+/// (major) dimension: rows run along M / N and columns along K. For example, the canonical layouts
+/// in CuTe notation, with `T` the number of elements in 128 bits, `m` the number of repeating
+/// patterns across rows and `k` across columns, are:
 ///
 /// | Major-ness | Swizzling | Canonical layout |
 /// |---|---|---|
@@ -159,8 +166,7 @@ impl SmemDescriptor {
     ///
     /// For such matrices, `base_offset` is `(pattern_start_address >> 7) & 0x7`, where
     /// `pattern_start_address` is the address at which the repeating pattern of the swizzle mode
-    /// starts. It must be 0 (the default) if the pattern starts at the usual boundary, and is
-    /// unused without swizzling.
+    /// starts. It must be 0 (the default) if the pattern starts at the usual boundary.
     ///
     /// The base offset must be 0 in the [absolute leading address
     /// mode](Self::with_absolute_leading_address).
@@ -219,8 +225,8 @@ impl SmemDescriptor {
     /// swizzling, each MMA of K = 16 advances the start address by 32 bytes.
     ///
     /// The start address field is not masked, so the new start address (the sum of the old one
-    /// and `bytes`) must stay below 256 KiB. Otherwise the carry corrupts the reserved bits
-    /// above the field. Any valid address in the shared memory of the CTA satisfies this.
+    /// and `bytes`) must stay below 256 KiB, the range covered by the encoding. Any valid address
+    /// in the shared memory of the CTA satisfies this.
     #[inline(always)]
     pub const fn add_start_bytes(self, bytes: u32) -> Self {
         assert!(
@@ -299,9 +305,12 @@ pub enum FloatAccumulator {
 ///
 /// In shared memory, the elements of the 4-bit and 6-bit types are packed contiguously in groups
 /// of 16 elements, each followed by padding to 16 bytes (8 bytes after 16 `e2m1` elements, 4 bytes
-/// after 16 `e2m3` or `e3m2` elements). This is also the source format of the decompressing
-/// [`copy`](super::copy) variants ([`CopyDecompression`](super::CopyDecompression)). Matrix A in
-/// Tensor Memory instead holds each element in an 8-bit container, as produced by such a copy.
+/// after 16 `e2m3` or `e3m2` elements), for the dense K = 32 of these kinds. This is also the
+/// source format of the decompressing [`copy`](super::copy) variants
+/// ([`CopyDecompression`](super::CopyDecompression)). Matrix A in Tensor Memory instead holds each
+/// element in an 8-bit container, as produced by such a copy.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-packing-formats-mxf8f6f4-smem>
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor>
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, ConstParamTy)]
@@ -390,7 +399,7 @@ pub enum Nvf4ScaleType {
 /// | Setter | Kinds |
 /// |---|---|
 /// | [`with_sparsity`](Self::with_sparsity) | all |
-/// | `with_sparsity_selector` | `F16`, `Tf32` |
+/// | `with_sparsity_selector` | `F16`, `Tf32` (the selector must be 0 for the other kinds) |
 /// | `with_saturate` | `I8` |
 /// | `with_negate_a`, `with_negate_b` | all but `I8` |
 /// | `with_major_a`, `with_major_b` | `F16`, `Tf32`, `F8f6f4`, `I8`, `Mxf8f6f4` |
@@ -502,6 +511,8 @@ impl InstrDescriptor<{ MmaKind::F16 }> {
     /// Creates a descriptor for `.kind::f16` with an M x N x K shape, matrices A and B of the
     /// types `a` and `b`, and an accumulator D of type `d`. Matrices A and B are K-major, are not
     /// negated, and the MMA is dense.
+    ///
+    /// An `f16` accumulator is only supported if both `a` and `b` are [`F16ElementType::F16`].
     ///
     /// The shape rules are given in the [type documentation](InstrDescriptor#shapes).
     ///
@@ -650,7 +661,7 @@ impl InstrDescriptor<{ MmaKind::F16 }> {
     ///
     /// [`with_sparsity`]: Self::with_sparsity
     ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor>
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-sparse-matrices-sparsity-selector>
     #[inline(always)]
     pub const fn with_sparsity_selector(self, selector: u32) -> Self {
         self.with_field(0, 2, selector)
@@ -665,7 +676,7 @@ impl InstrDescriptor<{ MmaKind::Tf32 }> {
     ///
     /// [`with_sparsity`]: Self::with_sparsity
     ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor>
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-sparse-matrices-sparsity-selector>
     #[inline(always)]
     pub const fn with_sparsity_selector(self, selector: u32) -> Self {
         self.with_field(0, 2, selector)
@@ -703,10 +714,10 @@ macro_rules! impl_major {
             /// Sets the major-ness of matrix A in shared memory ([`Major::Mn`] sets the transpose
             /// bit).
             ///
-            /// M-major matrices require 8-, 16- or 32-bit element types (so not the 6-bit and
-            /// 4-bit types of `.kind::f8f6f4` and `.kind::mxf8f6f4`). They are not supported with
-            /// the [`Swizzle::Bytes128Atom32B`] swizzle mode, except for `.kind::tf32`, which
-            /// supports them only with that mode.
+            /// The PTX ISA lists M-major matrices only for 8-, 16- and 32-bit element types, and
+            /// not for the 6-bit and 4-bit types of `.kind::f8f6f4` and `.kind::mxf8f6f4` with
+            /// dense K = 64. They are not supported with the [`Swizzle::Bytes128Atom32B`] swizzle
+            /// mode, except for `.kind::tf32`, which supports them only with that mode.
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor>
             #[inline(always)]
@@ -759,9 +770,11 @@ macro_rules! impl_scale_ids {
             /// the byte offset for one scale factor per row (`.scale_vec::1X`, `.block32` with
             /// `.kind::mxf8f6f4`) or for three (`.block32` with K = 96), and the half-word offset
             /// (0 or 2) for two (`.scale_vec::2X`) or six (`.block16` with K = 96). It must be 0
-            /// for four or eight scale factors (`.scale_vec::4X`, `.block16`).
+            /// for four or eight scale factors (`.scale_vec::4X`, `.block16`). For
+            /// `.kind::mxf4` and `.kind::mxf4nvf4`, the PTX ISA only lists 0 and 2 as values of
+            /// this field.
             ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor>
+            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-block-scaling>
             #[inline(always)]
             pub const fn with_scale_a_id(self, id: u32) -> Self {
                 self.with_field(29, 2, id)
@@ -771,7 +784,7 @@ macro_rules! impl_scale_ids {
             /// sub-columns of the Tensor Memory words of the scale_B matrix that hold the scale
             /// factors, like [`with_scale_a_id`](Self::with_scale_a_id).
             ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor>
+            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-block-scaling>
             #[inline(always)]
             pub const fn with_scale_b_id(self, id: u32) -> Self {
                 self.with_field(4, 2, id)
@@ -861,8 +874,9 @@ impl ZeroColumnMask {
     /// starts.
     ///
     /// The runs are stored as their lengths minus one, in the "skip span" (zeroed columns) and
-    /// "use span" (used columns) fields. Note that the PTX ISA documents the two fields the other
-    /// way around, which contradicts its examples.
+    /// "use span" (used columns) fields, and the non-zero mask bit that enables the generation of
+    /// the mask is set. Note that the PTX ISA documents the two span fields the other way around,
+    /// which contradicts its examples.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-zero-column-mask-descriptor>
     #[inline(always)]

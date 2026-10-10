@@ -18,7 +18,12 @@ use crate::{barrier::BarrierAlignment, mbarrier::MBarrier, modifiers::MemoryOrde
 ///
 /// `SEM` is [`MemoryOrdering::Release`] (`barrier.cluster.arrive`; orders the thread's prior
 /// memory accesses before the barrier completes) or [`MemoryOrdering::Relaxed`]
-/// (`barrier.cluster.arrive.relaxed`; no ordering of memory accesses).
+/// (`barrier.cluster.arrive.relaxed`; no ordering or visibility guarantees for prior memory
+/// accesses, which need an explicit fence if ordering is required). There are no ordering
+/// guarantees for the memory accesses between the arrive and the following [`barrier_wait`].
+///
+/// When all non-exited threads of the cluster have arrived, the barrier completes and is
+/// automatically reinitialized, so a thread may arrive again right after its wait returns.
 ///
 /// Requires `sm_90`.
 ///
@@ -46,8 +51,10 @@ pub unsafe fn barrier_arrive<const SEM: MemoryOrdering, const ALIGNMENT: Barrier
 }
 
 /// Waits until all non-exited threads of the cluster have arrived at the cluster barrier
-/// ([`barrier_arrive`]) for the current barrier phase. Also provides acquire semantics for the
-/// memory accesses released by the arrivals.
+/// ([`barrier_arrive`]) for the current barrier phase. Also provides acquire semantics: the memory
+/// accesses (except asynchronous operations) requested before the arrivals, in program order, are
+/// complete and visible to the executing thread afterwards (for [`MemoryOrdering::Release`]
+/// arrivals; see [`barrier_arrive`]).
 ///
 /// Requires `sm_90`.
 ///
@@ -71,6 +78,8 @@ pub unsafe fn barrier_wait<const ALIGNMENT: BarrierAlignment>() {
 /// `cluster.sync()` in CUDA C++).
 ///
 /// Requires `sm_90`.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-barrier-cluster>
 ///
 /// # Safety
 ///
@@ -100,10 +109,9 @@ pub unsafe fn barrier_sync<const ALIGNMENT: BarrierAlignment>() {
 ///
 /// # Safety
 ///
-/// `ptr` must point into the shared memory window of the executing CTA, and `cta_rank` must be
-/// less than the number of CTAs in the cluster. The resulting pointer is only valid for access as
-/// long as the target CTA has not exited and the usual data race rules for the accessed
-/// memory hold.
+/// `ptr` must be a generic address in the shared memory window, and `cta_rank` must be less than
+/// the number of CTAs in the cluster. The resulting pointer is only valid for access as long as
+/// the target CTA has not exited and the usual data race rules for the accessed memory hold.
 #[cfg(target_feature = "sm_90")]
 #[inline]
 pub unsafe fn map_to_cta<T>(ptr: *mut T, cta_rank: u32) -> *mut T {
@@ -119,8 +127,9 @@ pub unsafe fn map_to_cta<T>(ptr: *mut T, cta_rank: u32) -> *mut T {
 ///
 /// # Safety
 ///
-/// `ptr` must point into the shared memory of a CTA of the executing cluster (an address in the
-/// shared memory window of the executing CTA, or an address obtained from [`map_to_cta`]).
+/// `ptr` must be a generic address that falls within the shared memory of a CTA of the executing
+/// cluster (an address in the shared memory window of the executing CTA, or an address obtained
+/// from [`map_to_cta`]).
 #[cfg(target_feature = "sm_90")]
 #[inline]
 pub unsafe fn owning_cta_rank<T>(ptr: *const T) -> u32 {
@@ -177,8 +186,8 @@ impl ClusterStoreValue for f64 {}
 /// The receiving CTA typically initializes `mbar` and registers the number of bytes it expects
 /// with [`MBarrier::expect_tx`], then waits on the barrier to observe the stores.
 ///
-/// The store is a weak memory operation: its effects become visible to other threads only when
-/// synchronization is established through `mbar`.
+/// The store is a weak memory operation performed in the generic proxy: its effects become
+/// visible to other threads only when synchronization is established through `mbar`.
 ///
 /// Requires `sm_90`.
 ///
@@ -186,9 +195,10 @@ impl ClusterStoreValue for f64 {}
 ///
 /// # Safety
 ///
-/// `dst` and `mbar` must be generic addresses in the shared memory of the same CTA of the
-/// executing cluster (e.g. obtained from [`map_to_cta`], or in the executing CTA itself), `dst`
-/// must be aligned for `T`, and `mbar` must point to an initialized mbarrier of that CTA (see the
+/// The cluster must consist of more than one CTA (`cluster_size() > 1`). `dst` and `mbar` must be
+/// generic addresses in the shared memory of the same CTA of the executing cluster (e.g. obtained
+/// from [`map_to_cta`], or in the executing CTA itself), `dst` must be aligned for `T`, and `mbar`
+/// must point to an initialized mbarrier of that CTA (see the
 /// [safety contract](MBarrier#safety-contract-of-all-operations)).
 #[cfg(target_feature = "sm_90")]
 #[inline]

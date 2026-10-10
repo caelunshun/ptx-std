@@ -40,7 +40,7 @@
 //! memory access (`.L2::cache_hint`). The policy is only a performance hint and does not affect
 //! the memory consistency behavior of the program. Cache hints are only supported for global
 //! memory: `SPACE` must be [`AtomicSpace::Generic`] or [`AtomicSpace::Global`], and the address
-//! must point into global memory.
+//! must point into global memory. `atom_cas` has no cache-hint variant.
 //!
 //! # Safety contract
 //!
@@ -203,6 +203,10 @@ mod sealed {
 /// and [`f16x2`], and with `sm_90` also for [`bf16`], [`bf16x2`] and the vector types
 /// `[f16; 2 | 4 | 8]`, `[bf16; 2 | 4 | 8]`, `[f16x2; 2 | 4]`, `[bf16x2; 2 | 4]` and
 /// `[f32; 2 | 4]`.
+///
+/// `i64` is added with the `.u64` form, as PTX has no `.add.s64`; the result is identical in two's
+/// complement. Floating-point addition on `f64` requires `sm_60`, on `f16x2` `sm_60` and on
+/// `f16` `sm_70`.
 pub trait AtomicAdd: sealed::Rmw {}
 
 /// Types supporting [`atom_min`], [`atom_max`], [`red_min`] and [`red_max`].
@@ -228,7 +232,7 @@ pub trait AtomicExchange: sealed::Exch {}
 ///
 /// This trait is sealed. It is implemented for the 16-, 32- and 64-bit integers and floats,
 /// [`f16`](struct@f16), [`bf16`], [`f16x2`], [`bf16x2`] and raw pointers, and with `sm_90` also for `u128` and
-/// `i128`.
+/// `i128`. The 16-bit types require `sm_70`.
 pub trait AtomicCompareExchange: sealed::Cas {}
 
 /// Types supporting [`red_async_add`]: `u32`, `i32` and `u64`. This trait is sealed.
@@ -1258,7 +1262,8 @@ pub unsafe fn atom_exch_with_cache_hint<
 /// it is bitwise equal to `compare`.
 ///
 /// See the [module documentation](crate::atomic) for the meaning of `SEM`, `SCOPE` and `SPACE`.
-/// The 128-bit compare-and-swap of `u128` and `i128` requires `sm_90`.
+/// The 128-bit compare-and-swap of `u128` and `i128` requires `sm_90`, and the 16-bit types
+/// require `sm_70`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-atom>
 ///
@@ -1550,7 +1555,8 @@ impl_red_async_release! {
 /// [`Scope::Gpu`] or [`Scope::System`]. `TARGET` selects between a regular global address, a
 /// multimem address (`multimem.red.async`, which performs the reduction on the memory location on
 /// every GPU that the address refers to) and an MMIO operation (`.mmio`); the latter requires
-/// [`Scope::System`].
+/// [`Scope::System`]. `red.async` is performed in the generic proxy, and its completion
+/// synchronizes with the end of the CTA.
 ///
 /// `SPACE` must be [`AtomicSpace::Generic`] or [`AtomicSpace::Global`].
 ///
@@ -1564,7 +1570,7 @@ impl_red_async_release! {
 ///
 /// - `ptr` must be valid for reads and writes of `T`, aligned, and point into global memory.
 ///   With [`AsyncStoreTarget::Multimem`] it must be a multimem address (which must not be
-///   accessed by anything other than `multimem.*` and `*.async` operations); with
+///   accessed by anything other than `multimem.*` operations); with
 ///   [`AsyncStoreTarget::Mmio`] it must refer to memory-mapped I/O.
 /// - The reduction must not cause a data race.
 #[cfg(target_feature = "sm_100")]

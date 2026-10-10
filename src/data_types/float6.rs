@@ -12,11 +12,12 @@ use bytemuck::{Pod, Zeroable};
 #[allow(unused_imports)]
 use super::narrow::{narrow_x2, narrow_x4};
 
-/// Two packed FP6 E2M3 values (1 sign, 2 exponent and 3 mantissa bits; exponent bias 1)
+/// Two packed FP6 E2M3 values (1 sign, 2 exponent and 3 mantissa bits; exponent bias 1).
 ///
 /// The format has no infinities or NaNs; the largest finite magnitude is 7.5.
 ///
-/// Each value is stored in the low 6 bits of a byte. Element 0 occupies the low byte.
+/// Each value is stored in the low 6 bits of a byte; the two most significant bits of each byte
+/// must be zero when the value is used as a conversion source. Element 0 occupies the low byte.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#alternate-floating-point-data-formats>
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -49,8 +50,8 @@ narrow_x2! {
     },
 }
 
-/// Four packed FP6 E2M3 values; see [`f6e2m3x2`] for the format. Each value is stored in the low 6 bits
-/// of a byte. Element 0 occupies the low byte.
+/// Four packed FP6 E2M3 values; see [`f6e2m3x2`] for the format. Each value is stored in the low 6
+/// bits of a byte. Element 0 occupies the low byte.
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(transparent)]
 pub struct f6e2m3x4(u32);
@@ -76,11 +77,12 @@ narrow_x4! {
     core_rs: cvt_rs_e2m3x4_f32,
 }
 
-/// Two packed FP6 E3M2 values (1 sign, 3 exponent and 2 mantissa bits; exponent bias 3)
+/// Two packed FP6 E3M2 values (1 sign, 3 exponent and 2 mantissa bits; exponent bias 3).
 ///
 /// The format has no infinities or NaNs; the largest finite magnitude is 28.
 ///
-/// Each value is stored in the low 6 bits of a byte. Element 0 occupies the low byte.
+/// Each value is stored in the low 6 bits of a byte; the two most significant bits of each byte
+/// must be zero when the value is used as a conversion source. Element 0 occupies the low byte.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#alternate-floating-point-data-formats>
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -113,8 +115,8 @@ narrow_x2! {
     },
 }
 
-/// Four packed FP6 E3M2 values; see [`f6e3m2x2`] for the format. Each value is stored in the low 6 bits
-/// of a byte. Element 0 occupies the low byte.
+/// Four packed FP6 E3M2 values; see [`f6e3m2x2`] for the format. Each value is stored in the low 6
+/// bits of a byte. Element 0 occupies the low byte.
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(transparent)]
 pub struct f6e3m2x4(u32);

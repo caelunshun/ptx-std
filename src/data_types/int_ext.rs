@@ -36,20 +36,27 @@ pub enum MsbResult {
 /// Byte selection mode of [`U32Ext::permute_bytes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum PermuteMode {
-    /// Generic form: each 4-bit nibble of `selector[15:0]` selects one source byte out of the
-    /// eight bytes of `{b, a}`, optionally replicating its sign bit across the result byte.
+    /// Generic form: nibble `i` of `selector[15:0]` controls result byte `i`. Its 3 low bits
+    /// select one of the eight bytes of `{b, a}` and its most significant bit, if set, replicates
+    /// the sign bit of the selected byte across the result byte instead of copying it. Sign
+    /// replication is only available in this mode.
     Generic,
-    /// Forward 4 extract (`.f4e`).
+    /// Forward 4 extract (`.f4e`): result bytes 0 to 3 are bytes `s` to `s + 3` of `{b, a}`,
+    /// where `s = selector[1:0]`.
     ForwardExtract4,
-    /// Backward 4 extract (`.b4e`).
+    /// Backward 4 extract (`.b4e`): result bytes 0 to 3 are bytes `s`, `s - 1`, `s - 2` and
+    /// `s - 3` of `{b, a}` (indices modulo 8), where `s = selector[1:0]`.
     BackwardExtract4,
-    /// Replicate 8: replicates a single byte of `a` into all four result bytes (`.rc8`).
+    /// Replicate 8: replicates byte `selector[1:0]` of `a` into all four result bytes (`.rc8`).
     Replicate8,
-    /// Edge clamp left (`.ecl`).
+    /// Edge clamp left (`.ecl`): result byte `i` is byte `max(i, s)` of `a`, where
+    /// `s = selector[1:0]`.
     EdgeClampLeft,
-    /// Edge clamp right (`.ecr`).
+    /// Edge clamp right (`.ecr`): result byte `i` is byte `min(i, s)` of `a`, where
+    /// `s = selector[1:0]`.
     EdgeClampRight,
-    /// Replicate 16: replicates one 16-bit half of `a` into both result halves (`.rc16`).
+    /// Replicate 16: replicates the 16-bit half of `a` chosen by `selector[0]` (low half if clear,
+    /// high half if set) into both result halves (`.rc16`).
     Replicate16,
 }
 
@@ -125,8 +132,12 @@ pub trait U32Ext: Sized {
 
     /// Generates a mask of `len` set bits starting at bit position `start`.
     ///
-    /// In [`ClampMode::Clamp`] mode, a `start` of 32 or more yields zero and the mask is
-    /// truncated at bit 32; in [`ClampMode::Wrap`] mode `start` and `len` are taken modulo 32.
+    /// In [`ClampMode::Clamp`] mode, a `start` of 32 or more yields zero, and a `len` of 32 or
+    /// more extends the mask up to bit 31. In [`ClampMode::Wrap`] mode `start` and `len` are
+    /// taken modulo 32. A `len` of zero (after wrapping) yields zero, and bits at or above bit 32
+    /// are truncated.
+    ///
+    /// Requires `sm_70`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-bmsk>
     fn bit_mask<const MODE: ClampMode>(start: u32, len: u32) -> u32;
@@ -136,6 +147,8 @@ pub trait U32Ext: Sized {
     /// A `bits` of zero yields zero. If `bits >= 32`, [`ClampMode::Clamp`] returns `self`
     /// unchanged, while [`ClampMode::Wrap`] takes `bits` modulo 32.
     ///
+    /// Requires `sm_70`.
+    ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-szext>
     fn zero_extend_from<const MODE: ClampMode>(self, bits: u32) -> u32;
 
@@ -144,7 +157,8 @@ pub trait U32Ext: Sized {
     ///
     /// The search proceeds towards the most significant bit if `offset` is positive and towards
     /// the least significant bit if it is negative. An `offset` of zero returns `base` if that
-    /// bit is set. Returns `u32::MAX` if no such bit exists. `base` must be at most 31.
+    /// bit is set. Returns `u32::MAX` if no such bit exists. `base` must be at most 31, otherwise
+    /// the behavior is undefined.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-fns>
     fn find_nth_set_bit(self, base: u32, offset: i32) -> u32;
@@ -175,6 +189,8 @@ pub trait I32Ext: Sized {
     /// A `bits` of zero yields zero. If `bits >= 32`, [`ClampMode::Clamp`] returns `self`
     /// unchanged, while [`ClampMode::Wrap`] takes `bits` modulo 32.
     ///
+    /// Requires `sm_70`.
+    ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-szext>
     fn sign_extend_from<const MODE: ClampMode>(self, bits: u32) -> i32;
 }
@@ -185,6 +201,8 @@ pub trait I32Ext: Sized {
 /// into `rhs` are interpreted as unsigned if the respective type is `u32` and as signed if it is
 /// `i32`. The accumulator and result are signed if either operand is signed, and unsigned
 /// otherwise.
+///
+/// Requires `sm_61`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-dp4a>
 pub trait Dot4<Rhs> {
@@ -201,6 +219,8 @@ pub trait Dot4<Rhs> {
 /// multiplied with the two selected bytes of `rhs`. Each operand is interpreted as unsigned if
 /// its type is `u32` and as signed if it is `i32`. The accumulator and result are signed if
 /// either operand is signed, and unsigned otherwise.
+///
+/// Requires `sm_61`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-dp2a>
 pub trait Dot2<Rhs> {

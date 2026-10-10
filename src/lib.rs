@@ -1,3 +1,14 @@
+//! A `no_std` standard library for writing GPU kernels in Rust, targeting
+//! `nvptx64-nvidia-cuda` and exposing PTX instructions and CUDA runtime facilities (special
+//! registers, warp and cluster collectives, barriers, memory operations, atomics, TMA and
+//! tensor cores, ...) as Rust functions.
+//!
+//! The crate requires PTX ISA 9.3 and an `sm_80` or later target. Some items are only available
+//! on newer architectures and are gated on the corresponding `target_feature`s; their
+//! documentation lists the requirement.
+//!
+//! The PTX ISA reference is at <https://docs.nvidia.com/cuda/parallel-thread-execution/>.
+
 #![feature(stdarch_nvptx, asm_experimental_arch, adt_const_params, f16)]
 #![allow(incomplete_features)]
 #![no_std]

@@ -7,6 +7,8 @@
 //!
 //! Note that the data is not visible to other threads of the CTA after [`wait_group`] or
 //! [`wait_all`] alone: a CTA-wide barrier is still needed.
+//!
+//! Requires `sm_80`.
 
 use core::{arch::nvptx as nv, marker::ConstParamTy, mem::size_of};
 
@@ -112,7 +114,8 @@ pub fn commit_group() {
 /// executing thread are still pending, i.e. all older groups have completed.
 ///
 /// Use `wait_group::<0>()` to wait for all committed groups. Uncommitted `cp.async` operations
-/// are not waited for.
+/// are not waited for. Once a group has completed, the writes of its copies are visible to the
+/// executing thread only; this provides no ordering or visibility for other memory operations.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-wait-group>
 #[inline]
@@ -122,9 +125,10 @@ pub fn wait_group<const PENDING: u32>() {
 }
 
 /// Waits until all prior `cp.async` operations of the executing thread have completed, whether
-/// committed to a group or not.
+/// committed to a group or not (it is equivalent to [`commit_group`] followed by
+/// `wait_group::<0>()`).
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-wait-all>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cp-async-wait-group>
 #[inline]
 pub fn wait_all() {
     // SAFETY: only waits for the executing thread's own async copies.

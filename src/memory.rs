@@ -18,7 +18,7 @@ mod sealed {
     pub trait AsyncStore {}
 }
 
-/// A cache level to prefetch data into.
+/// A cache level to prefetch data into (`.level`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum CacheLevel {
     /// The L1 data cache (`.L1`).
@@ -30,16 +30,20 @@ pub enum CacheLevel {
 /// The eviction priority applied to cache lines in the L2 cache
 /// (`.level::eviction_priority`).
 ///
-/// Not every operation supports every priority; see the documentation of each operation.
+/// Not every operation supports every priority; see the documentation of each operation. Eviction
+/// priorities are performance hints only.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#cache-eviction-priority-hints>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum L2EvictionPriority {
-    /// Evict the cache line normally (`.L2::evict_normal`).
+    /// Cache the data with normal eviction priority, the default (`.L2::evict_normal`).
     Normal,
-    /// Evict the cache line last, i.e. keep it resident as long as possible
+    /// Evict the cache line last, i.e. only after other data with normal or first eviction
+    /// priority has been evicted. Suitable for data that should remain persistent in the cache
     /// (`.L2::evict_last`).
     Last,
-    /// Evict the cache line first, i.e. it is likely to be accessed only once
-    /// (`.L2::evict_first`).
+    /// Evict the cache line first, i.e. it will likely be evicted when eviction is required.
+    /// Suitable for streaming data (`.L2::evict_first`).
     First,
     /// Do not change the eviction priority of the cache line (`.L2::evict_unchanged`).
     Unchanged,
@@ -53,7 +57,8 @@ pub enum L2EvictionPriority {
 /// [`CachePolicy::from_access_property`]. Passing `None` instead of a policy to an operation
 /// omits the `.L2::cache_hint` qualifier.
 ///
-/// The policy is only a performance hint and does not affect the memory model.
+/// The policy is only a performance hint and does not affect the memory model. It is only
+/// applied to accesses to global memory. `createpolicy` requires `sm_80`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#cache-eviction-priority-hints>
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Pod, Zeroable)]
@@ -88,7 +93,8 @@ macro_rules! create_policy {
 }
 
 impl CachePolicy {
-    /// Wraps the raw policy value produced by `createpolicy`.
+    /// Wraps the raw policy value produced by `createpolicy`. The value is opaque and should only
+    /// originate from `createpolicy`.
     #[inline]
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -175,8 +181,10 @@ impl CachePolicy {
     /// # Safety
     ///
     /// - `base` must be a generic address within the window of the global state space (see
-    ///   [`is_in_address_space`]). It does not need to be valid for reads or writes.
-    /// - `primary_size` must be less than or equal to `total_size`.
+    ///   [`is_in_address_space`]); otherwise the behavior is undefined. It does not need to be
+    ///   valid for reads or writes.
+    /// - `primary_size` must be less than or equal to `total_size`. (The maximum `total_size` of
+    ///   4 GiB is enforced by the `u32` type.)
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-createpolicy>
     #[inline]
@@ -213,7 +221,8 @@ impl CachePolicy {
     }
 
     /// Converts an access property created by the CUDA APIs (e.g. `cuda::access_property`) into
-    /// a cache eviction policy (`createpolicy.cvt.L2`).
+    /// a cache eviction policy (`createpolicy.cvt.L2`). Refer to the CUDA programming guide for
+    /// details on access properties.
     ///
     /// # Safety
     ///
@@ -236,31 +245,34 @@ impl CachePolicy {
     }
 }
 
-/// A PTX state space, used to query which window of the generic address space a pointer lies in.
+/// A PTX state space, used to query which window of the generic address space a pointer lies in
+/// with [`is_in_address_space`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum AddressSpace {
     /// Constant memory (`.const`).
     Constant,
-    /// Global memory (`.global`).
+    /// Global memory (`.global`). This window also contains the kernel parameter space.
     Global,
     /// Thread-local memory (`.local`).
     Local,
     /// Shared memory of the executing CTA (`.shared::cta`).
     Shared,
-    /// Shared memory of any CTA in the executing cluster (`.shared::cluster`).
+    /// Shared memory of any CTA in the executing cluster (`.shared::cluster`). Contains the
+    /// [`AddressSpace::Shared`] window.
     ///
     /// Requires `sm_90`.
     SharedCluster,
 }
 
-/// Prefetches the cache line containing `ptr` into the cache level `LEVEL`.
+/// Prefetches the cache line containing `ptr`, in global or local memory, into the cache level
+/// `LEVEL`.
 ///
 /// This is only a performance hint and does not affect the memory model, so `ptr` does not need
 /// to be valid. Prefetching a shared memory address is a no-op.
 ///
 /// Requires `sm_90`.
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch-prefetchu>
 #[cfg(target_feature = "sm_90")]
 #[inline]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -280,11 +292,11 @@ pub fn prefetch<const LEVEL: CacheLevel, T>(ptr: *const T) {
 ///
 /// # Safety
 ///
-/// `ptr` must point into global memory.
+/// `ptr` must point into global memory; otherwise the behavior is undefined.
 ///
 /// Requires `sm_90`.
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch-prefetchu>
 #[cfg(target_feature = "sm_90")]
 #[inline]
 pub unsafe fn prefetch_l2_with_priority<const PRIORITY: L2EvictionPriority, T>(ptr: *const T) {
@@ -311,7 +323,7 @@ pub unsafe fn prefetch_l2_with_priority<const PRIORITY: L2EvictionPriority, T>(p
 ///
 /// Requires `sm_90`.
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch-prefetchu>
 #[cfg(target_feature = "sm_90")]
 #[inline]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -320,11 +332,15 @@ pub fn prefetch_uniform<T>(ptr: *const T) {
     unsafe { nv::prefetchu_l1(ptr) }
 }
 
-/// Resets the L2 eviction priority of the 128 bytes starting at `ptr` to `evict_normal`.
+/// Resets the L2 eviction priority of the 128 bytes `[ptr, ptr + 128)` to `evict_normal`
+/// (`applypriority.global.L2::evict_normal`). 128 is the only size supported by PTX.
 ///
 /// # Safety
 ///
-/// `ptr` must point into global memory and be aligned to 128 bytes.
+/// `ptr` must point into global memory (otherwise the behavior is undefined) and be aligned to
+/// 128 bytes.
+///
+/// Requires `sm_80`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-applypriority>
 #[inline]
@@ -336,13 +352,16 @@ pub unsafe fn apply_l2_evict_normal_priority(ptr: *const u8) {
 /// without being written back to memory.
 ///
 /// Semantically this is a weak write of an unstable indeterminate value: until the memory is
-/// overwritten, reads may return a different bit pattern each time.
+/// overwritten, reads may return a different bit pattern each time. 128 is the only size
+/// supported by PTX.
 ///
 /// # Safety
 ///
-/// `ptr` must point into global memory and be aligned to 128 bytes. The 128 bytes must be valid
-/// for writes and must not be read before being overwritten, unless the caller can accept
-/// arbitrary values.
+/// `ptr` must point into global memory (otherwise the behavior is undefined) and be aligned to
+/// 128 bytes. The 128 bytes must be valid for writes and must not be read before being
+/// overwritten, unless the caller can accept arbitrary values.
+///
+/// Requires `sm_80`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-discard>
 #[inline]
@@ -428,9 +447,12 @@ const fn assert_address_space_supported(space: AddressSpace) {
 }
 
 /// Returns whether the generic address `ptr` falls within the window of the address space
-/// `SPACE`.
+/// `SPACE` (`isspacep`).
 ///
 /// The address does not need to be valid; this only inspects the address value.
+/// [`AddressSpace::SharedCluster`] is true for every shared memory address accessible to the
+/// threads of the cluster, whereas [`AddressSpace::Shared`] is true only for addresses in the
+/// executing CTA.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-isspacep>
 #[inline]
@@ -452,7 +474,7 @@ pub fn is_in_address_space<const SPACE: AddressSpace, T>(ptr: *const T) -> bool 
 /// `tcgen05` instructions. They are also valid `.shared::cluster` addresses referring to the
 /// executing CTA.
 ///
-/// The result is unspecified if `ptr` does not point into the shared memory window of the
+/// The result is undefined if `ptr` does not point into the shared memory window of the
 /// executing CTA (see [`is_in_address_space`]).
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvta>
@@ -475,12 +497,12 @@ pub fn to_shared_address<T>(ptr: *const T) -> u32 {
 /// Zero-fills `size` bytes of shared memory of the executing CTA starting at `ptr`, using a
 /// bulk store (`st.bulk`).
 ///
-/// The store is a weak memory operation.
+/// The store is a weak memory operation. PTX only supports initializing to zero.
 ///
 /// # Safety
 ///
-/// - `ptr` must point into the shared memory of the executing CTA, and the `size` bytes must be
-///   valid for writes.
+/// - `ptr` must point into the shared memory of the executing CTA (otherwise the behavior is
+///   undefined), and the `size` bytes must be valid for writes.
 /// - `size` must be a multiple of 8 and at most 16777216 (16 MiB).
 ///
 /// Requires `sm_100`.
@@ -499,8 +521,8 @@ pub unsafe fn zero_fill_shared(ptr: *mut u8, size: usize) {
 pub enum AsyncStoreTarget {
     /// A regular global memory address.
     Global,
-    /// A multimem address: the value is stored to the memory location on every GPU that the
-    /// address refers to (`multimem.st.async`).
+    /// A multimem address: the operation is performed on the memory location on every GPU that
+    /// the address refers to (`multimem.st.async`, `multimem.red.async`).
     Multimem,
     /// Memory-mapped I/O (`.mmio`). Requires [`Scope::System`].
     Mmio,
@@ -575,15 +597,16 @@ pub(crate) const fn assert_async_store_supported(scope: Scope, target: AsyncStor
 /// scope `SCOPE`.
 ///
 /// `st.async` is non-blocking: the store is initiated and may complete after this function
-/// returns. `SCOPE` must be [`Scope::Gpu`] or [`Scope::System`]. `TARGET` selects between a
-/// regular global address, a multimem address (`multimem.st.async`) and an MMIO store; the
-/// latter requires [`Scope::System`].
+/// returns. It is performed in the generic proxy and is a strong memory operation with release
+/// semantics at `SCOPE`. `SCOPE` must be [`Scope::Gpu`] or [`Scope::System`]. `TARGET` selects
+/// between a regular global address, a multimem address (`multimem.st.async`) and an MMIO store;
+/// the latter requires [`Scope::System`].
 ///
 /// # Safety
 ///
 /// - `dst` must be valid for writes and aligned, and point into global memory. With
 ///   [`AsyncStoreTarget::Multimem`] it must be a multimem address (which must not be accessed
-///   by anything other than `multimem.*` and `st.async` operations); with
+///   by anything other than `multimem.*` operations); with
 ///   [`AsyncStoreTarget::Mmio`] it must refer to memory-mapped I/O.
 /// - The store must not race with other non-atomic accesses to `dst`.
 ///

@@ -24,19 +24,30 @@ pub enum Rounding {
 }
 
 /// The set of threads that a memory operation or fence is performed with respect to.
+///
+/// The warp is not a scope; the CTA is the smallest collection of threads that qualifies as one.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#scope>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum Scope {
     /// The threads of the executing CTA (`.cta`).
     Cta,
     /// The threads of the executing cluster (`.cluster`).
     Cluster,
-    /// The threads of the current program on the executing device (`.gpu`).
+    /// The threads of the current program on the executing device, including other kernel grids
+    /// launched by the host program on the same device (`.gpu`).
     Gpu,
-    /// The threads of the current program on all devices and the host (`.sys`).
+    /// The threads of the current program on all devices, including the host program itself
+    /// (`.sys`).
     System,
 }
 
 /// Memory ordering semantics of a memory operation or fence.
+///
+/// Not every instruction supports every ordering; see the documentation of the function taking
+/// the ordering as a parameter. [`MemoryOrdering::SeqCst`] is only meaningful for fences.
+///
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#operation-types>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum MemoryOrdering {
     /// `.relaxed`
@@ -47,7 +58,7 @@ pub enum MemoryOrdering {
     Release,
     /// `.acq_rel`
     AcqRel,
-    /// Sequentially consistent (`.sc`).
+    /// Sequentially consistent (`.sc`, only available on `fence`).
     SeqCst,
 }
 
@@ -94,13 +105,13 @@ pub enum Relu {
 pub enum NanHandling {
     /// If exactly one input is NaN, the other input is returned (IEEE 754 `minNum`/`maxNum`).
     Ignore,
-    /// If any input is NaN, the result is canonical NaN (`.NaN`).
+    /// If any input is NaN, the result is canonical NaN (`.NaN`). Requires `sm_80` for `f32`.
     Propagate,
 }
 
 /// Sign and magnitude handling of floating-point min/max operations (`.xorsign.abs`).
 ///
-/// Requires `sm_86`.
+/// Requires `sm_86` and is only available for the two-input forms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum XorSignAbs {
     /// The usual min/max semantics.
@@ -126,13 +137,14 @@ pub enum XorSignAbs {
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-cta-pair>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum CtaGroup {
-    /// No `.cta_group` qualifier. Only valid for TMA operations.
+    /// No `.cta_group` qualifier. Only valid for TMA operations, where it behaves like
+    /// [`CtaGroup::One`].
     Unspecified,
     /// `.cta_group::1`: the operation is issued on behalf of the executing CTA only. TMA loads
-    /// signal completion on the mbarrier of the executing CTA.
+    /// signal an mbarrier that must reside in the same CTA as the shared memory destination.
     One,
     /// `.cta_group::2`: the operation is issued on behalf of the CTA pair of the executing CTA.
-    /// TMA loads signal completion on the mbarrier of either CTA of the pair, as defined by the
-    /// PTX ISA, and `tcgen05` operations access the Tensor Memory of both CTAs of the pair.
+    /// TMA loads may signal an mbarrier in either the destination CTA or its peer CTA, and
+    /// `tcgen05` operations access the Tensor Memory of both CTAs of the pair.
     Two,
 }

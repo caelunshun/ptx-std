@@ -76,9 +76,12 @@ macro_rules! narrow_x2 {
 
             #[doc = concat!("Converts two `f32` values to a packed pair of ", $name, " values, rounding to nearest even.")]
             ///
-            /// `x[0]` becomes element 0 and `x[1]` becomes element 1. Out-of-range values are
-            /// clamped to the largest finite value of matching sign (`.satfinite`). `RELU`
-            /// clamps negative results to zero.
+            /// `x[0]` becomes element 0 and `x[1]` becomes element 1. Out-of-range values,
+            /// including infinities, are clamped to the largest finite value of matching sign
+            /// (`.satfinite`). NaN becomes NaN if the format has one (FP8) and the largest positive
+            /// finite value otherwise (FP4, FP6). `RELU` clamps negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($basic), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($basic)]
@@ -91,9 +94,12 @@ macro_rules! narrow_x2 {
 
             #[doc = concat!("Converts a packed pair of `f16` values to a packed pair of ", $name, " values, rounding to nearest even.")]
             ///
-            /// Element `i` of the result is converted from element `i` of `x`. Out-of-range values
-            /// are clamped to the largest finite value of matching sign (`.satfinite`). `RELU`
-            /// clamps negative results to zero.
+            /// Element `i` of the result is converted from element `i` of `x`. Out-of-range values,
+            /// including infinities, are clamped to the largest finite value of matching sign
+            /// (`.satfinite`). NaN becomes NaN if the format has one (FP8) and the largest positive
+            /// finite value otherwise (FP4, FP6). `RELU` clamps negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($from_f16x2_cfg), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($from_f16x2_cfg)]
@@ -106,9 +112,12 @@ macro_rules! narrow_x2 {
 
             #[doc = concat!("Converts a packed pair of `bf16` values to a packed pair of ", $name, " values, rounding to nearest even.")]
             ///
-            /// Element `i` of the result is converted from element `i` of `x`. Out-of-range values
-            /// are clamped to the largest finite value of matching sign (`.satfinite`). `RELU`
-            /// clamps negative results to zero.
+            /// Element `i` of the result is converted from element `i` of `x`. Out-of-range values,
+            /// including infinities, are clamped to the largest finite value of matching sign
+            /// (`.satfinite`). NaN becomes NaN if the format has one (FP8) and the largest positive
+            /// finite value otherwise (FP4, FP6). `RELU` clamps negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($newer), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($newer)]
@@ -121,8 +130,10 @@ macro_rules! narrow_x2 {
 
             #[doc = concat!("Converts the packed pair of ", $name, " values to a packed pair of `f16` values.")]
             ///
-            /// Element `i` of the result is converted from element `i` of `self`. `RELU` clamps
-            /// negative results to zero.
+            /// Element `i` of the result is converted from element `i` of `self`. The conversion
+            /// is exact; `RELU` clamps negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($basic), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($basic)]
@@ -140,6 +151,8 @@ macro_rules! narrow_x2 {
             ///
             /// Implemented as [`Self::to_bf16x2_scaled`] with unit scale factors.
             ///
+            #[doc = concat!("Available when `cfg(", stringify!($newer), ")` holds.")]
+            ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($newer)]
             #[inline]
@@ -153,6 +166,8 @@ macro_rules! narrow_x2 {
             /// element `i` of `scale` (`.scaled::n2::ue8m0`). `RELU` clamps negative results to
             /// zero. With [`Overflow::SaturateFinite`](crate::Overflow::SaturateFinite), results outside the finite range are
             /// clamped to the largest finite `bf16` value of matching sign.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($newer), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($newer)]
@@ -207,11 +222,15 @@ macro_rules! narrow_x4 {
 
             #[doc = concat!("Converts four `f32` values to ", $name, " values, rounding to nearest even.")]
             ///
-            /// `x[i]` becomes element `i`. Out-of-range values are clamped to the largest finite
-            /// value of matching sign (`.satfinite`). `RELU` clamps negative results to zero.
+            /// `x[i]` becomes element `i`. Out-of-range values, including infinities, are clamped
+            /// to the largest finite value of matching sign (`.satfinite`). NaN becomes NaN if the
+            /// format has one (FP8) and the largest positive finite value otherwise (FP4, FP6).
+            /// `RELU` clamps negative results to zero.
             ///
             /// Implemented as two pair conversions; see [`Self::from_f32s_stochastic`] for
             /// stochastic rounding.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($basic), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($basic)]
@@ -225,11 +244,18 @@ macro_rules! narrow_x4 {
 
             #[doc = concat!("Converts four `f32` values to ", $name, " values with stochastic rounding (`.rs`).")]
             ///
-            /// `x[i]` becomes element `i`. `rbits` provides the random bits: the upper 16 bits
-            /// are used for elements 2 and 3 and the lower 16 bits for elements 0 and 1 (see the
-            /// PTX ISA for the exact bit layout). Out-of-range values are clamped to the largest
-            /// finite value of matching sign (`.satfinite`). `RELU` clamps negative results to
-            /// zero.
+            /// `x[i]` becomes element `i`. Each value is rounded towards or away from zero
+            /// depending on the carry out of adding its random bits to the discarded mantissa bits.
+            /// `rbits` provides the random bits: for FP8 and FP6 the upper 16 bits are used for
+            /// elements 2 and 3 and the lower 16 bits for elements 0 and 1; for FP4 only 8 bits per
+            /// element are used, the upper 8 bits of each 16-bit half for elements 2 and 3 and the
+            /// lower 8 bits of each half for elements 0 and 1 (see the PTX ISA for the exact bit
+            /// layout). Out-of-range values, including infinities, are clamped to the largest
+            /// finite value of matching sign (`.satfinite`). NaN becomes NaN if the format has one
+            /// (FP8) and the largest positive finite value otherwise (FP4, FP6). `RELU` clamps
+            /// negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($stochastic), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($stochastic)]
@@ -244,8 +270,12 @@ macro_rules! narrow_x4 {
             #[doc = concat!("Converts four `f16` values, given as two packed pairs, to ", $name, " values, rounding to nearest even.")]
             ///
             /// Element `i` of the result is converted from `x[i / 2]`, element `i % 2`.
-            /// Out-of-range values are clamped to the largest finite value of matching sign
-            /// (`.satfinite`). `RELU` clamps negative results to zero.
+            /// Out-of-range values, including infinities, are clamped to the largest finite value
+            /// of matching sign (`.satfinite`). NaN becomes NaN if the format has one (FP8) and the
+            /// largest positive finite value otherwise (FP4, FP6). `RELU` clamps negative results
+            /// to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($from_f16x2_cfg), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($from_f16x2_cfg)]
@@ -260,8 +290,12 @@ macro_rules! narrow_x4 {
             #[doc = concat!("Converts four `bf16` values, given as two packed pairs, to ", $name, " values, rounding to nearest even.")]
             ///
             /// Element `i` of the result is converted from `x[i / 2]`, element `i % 2`.
-            /// Out-of-range values are clamped to the largest finite value of matching sign
-            /// (`.satfinite`). `RELU` clamps negative results to zero.
+            /// Out-of-range values, including infinities, are clamped to the largest finite value
+            /// of matching sign (`.satfinite`). NaN becomes NaN if the format has one (FP8) and the
+            /// largest positive finite value otherwise (FP4, FP6). `RELU` clamps negative results
+            /// to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($newer), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($newer)]
@@ -275,8 +309,10 @@ macro_rules! narrow_x4 {
 
             #[doc = concat!("Converts the four ", $name, " values to `f16` values, returned as two packed pairs.")]
             ///
-            /// Element `i` of `self` becomes element `i % 2` of the result at index `i / 2`.
-            /// `RELU` clamps negative results to zero.
+            /// Element `i` of `self` becomes element `i % 2` of the result at index `i / 2`. The
+            /// conversion is exact; `RELU` clamps negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($basic), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($basic)]
@@ -290,6 +326,8 @@ macro_rules! narrow_x4 {
             ///
             /// Element `i` of `self` becomes element `i % 2` of the result at index `i / 2`. The
             /// conversion is exact; `RELU` clamps negative results to zero.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($newer), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($newer)]
@@ -305,6 +343,8 @@ macro_rules! narrow_x4 {
             /// `i % 2` of the result at index `i / 2`. `RELU` clamps negative results to zero.
             /// With [`Overflow::SaturateFinite`](crate::Overflow::SaturateFinite), results outside the finite range are clamped to
             /// the largest finite `bf16` value of matching sign.
+            ///
+            #[doc = concat!("Available when `cfg(", stringify!($newer), ")` holds.")]
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($newer)]

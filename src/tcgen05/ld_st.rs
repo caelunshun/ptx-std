@@ -17,11 +17,24 @@ use crate::{NanHandling, warp_collectives::Absolute, warp_collectives::ReduxOp};
 /// dimensions of the data accessed by a warp with a repeat factor of 1 (`.x1`). The data accessed
 /// by a call is this shape repeated along the columns `N / registers per .x1` times (`.xNUM`).
 ///
-/// The registers of a thread hold the fragment elements from low to high; see the figures of the
-/// matrix fragments of each shape in the PTX ISA for the mapping of the elements to the threads of
-/// the warp. For the 32-lane shape, thread `i` of the warp accesses lane `i` of the warp's lane
-/// quarter. The 16-lane shapes access the 16 lanes starting at the lane of the address, which must
-/// lie in the lane quarter of the warp.
+/// The 32-lane shape accesses the 32 lanes of the warp's lane quarter. The 16-lane shapes access
+/// the 16 lanes starting at the lane of the address, which must lie in the lane quarter of the
+/// warp (for the MMA layouts that use half of the datapath lanes, 0 or 16 lanes into the quarter).
+///
+/// With a repeat factor of 1 (`.x1`), thread `t` of the warp holds the following, where `r_k` is
+/// the `k`-th register of the thread and lanes are counted from the first lane accessed (see the
+/// figures of the matrix fragments of each shape in the PTX ISA):
+///
+/// | Shape | Elements of thread `t` |
+/// |---|---|
+/// | `S32x32b` | `r0`: the 32-bit cell of lane `t`. |
+/// | `S16x64b` | `r0`: the low (`t % 4 < 2`) or high (`t % 4 >= 2`) 32 bits of the 64-bit row of lane `t / 4 + 8 * (t % 2)`. |
+/// | `S16x128b` | `r0`: word `t % 4` of the 128-bit row of lane `t / 4`. `r1`: the same word of lane `t / 4 + 8`. |
+/// | `S16x256b` | `r0`, `r1`: words `2 * (t % 4)` and `2 * (t % 4) + 1` of the 256-bit row of lane `t / 4`. `r2`, `r3`: the same words of lane `t / 4 + 8`. |
+/// | `load_16x32bx2` / `store_16x32bx2` | `r0`: the 32-bit cell of lane `t % 16` of the first region (`t < 16`) or of the second region (`t >= 16`). |
+///
+/// Larger repeat factors repeat this pattern along the columns, with the registers continuing in
+/// order (for the 16x64b shape with `.x2`, `r1` is the next 64-bit column).
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-movement-shape>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
@@ -43,7 +56,7 @@ pub enum LdStShape {
 /// corresponds to two adjacent 32-bit columns of Tensor Memory (holding a 16-bit element each), so
 /// the accessed region spans twice as many columns.
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-packing-unpacking>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-tensor-memory-ld-st-packing-unpacking>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum Packing {
     /// The 32-bit elements are moved as they are.
@@ -277,12 +290,13 @@ pub unsafe fn load<const SHAPE: LdStShape, const PACK: Packing, T: Pod, const N:
 /// threads of the warp (`tcgen05.ld.16x32bx2`).
 ///
 /// The first region is located at `addr`, and the second at the address `addr +
-/// HALF_SPLIT_OFFSET`. Each region is repeated `N` times along the columns (`.xN`), and each
-/// thread receives `N` registers; typically, the offset is chosen so that the second region
-/// continues the first, i.e. `HALF_SPLIT_OFFSET = N` (`2 * N` with [`Packing::Pack16b`], under
-/// which each region spans twice as many columns). `N` must be a power of two between 1 and 128.
-/// The other parameters are as for [`load`], including the asynchrony and the lane quarter
-/// restriction.
+/// HALF_SPLIT_OFFSET` (an immediate operand of the instruction). Each region is repeated `N` times
+/// along the columns (`.xN`), and each thread receives `N` registers: threads 0 to 15 receive the
+/// first region and threads 16 to 31 the second (see [`LdStShape`]). Typically, the offset is
+/// chosen so that the second region continues the first, i.e. `HALF_SPLIT_OFFSET = N` (`2 * N` with
+/// [`Packing::Pack16b`], under which each region spans twice as many columns). `N` must be a power
+/// of two between 1 and 128. The other parameters are as for [`load`], including the asynchrony
+/// and the lane quarter restriction.
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f`.
 ///
@@ -501,7 +515,8 @@ macro_rules! asm_reduce_variants {
 /// instructions of the thread, and [`wait_load`] is required before the Tensor Memory is
 /// overwritten by other operations.
 ///
-/// Requires `sm_101f`, `sm_103f` or `sm_110f`. It is not supported on `sm_100a` or `sm_100f`.
+/// Requires `sm_101f`, `sm_103f` or `sm_110f` (or `sm_101a`, `sm_103a`, `sm_110a`). It is not
+/// supported on `sm_100a` or `sm_100f`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instructions-tcgen05-ld>
 ///
@@ -558,7 +573,8 @@ pub unsafe fn load_reduce<
 ///
 /// The reduction parameters and the results are as for [`load_reduce`].
 ///
-/// Requires `sm_101f`, `sm_103f` or `sm_110f`. It is not supported on `sm_100a` or `sm_100f`.
+/// Requires `sm_101f`, `sm_103f` or `sm_110f` (or `sm_101a`, `sm_103a`, `sm_110a`). It is not
+/// supported on `sm_100a` or `sm_100f`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instructions-tcgen05-ld>
 ///

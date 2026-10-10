@@ -56,8 +56,10 @@ pub enum CopyDecompression {
 ///
 /// The copy is issued by a single thread. Its completion is tracked with [`commit`](super::commit),
 /// and a following [`mma`](super::mma) of the same thread that reads the copied data as matrix A
-/// (or sparsity metadata or scale factors) at the same address is ordered after the copy without
-/// further synchronization. The shared memory is read through the async proxy.
+/// or as sparsity metadata at the same address (any address with [`CopyShape::S4x256b`]) is
+/// ordered after the copy without further synchronization. Any other consumer of the copied data,
+/// such as the scale factors of a block-scaled MMA, needs the completion to be observed with
+/// [`commit`](super::commit) first. The shared memory is read through the async proxy.
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f`.
 ///
@@ -113,13 +115,14 @@ pub unsafe fn copy<
 /// Initiates an asynchronous shift of the 32-byte elements of the matrix at `addr` down by one
 /// lane, across all lanes except the last (`tcgen05.shift.down`).
 ///
-/// The shift reads lanes `0..31` and writes lanes `1..32` of the 32 lanes × 256 bits starting at
-/// `addr`. With [`CtaGroup::Two`], the shift is performed in the Tensor Memory of both the
-/// executing CTA and its peer CTA.
+/// The shift reads lanes 0 to 30 and writes lanes 1 to 31 of the 32 lanes × 256 bits starting at
+/// `addr` (an implicit `.31x256b` shape). With [`CtaGroup::Two`], the shift is performed in the
+/// Tensor Memory of both the executing CTA and its peer CTA.
 ///
 /// The shift is issued by a single thread. Its completion is tracked with
 /// [`commit`](super::commit), and a following [`mma`](super::mma) of the same thread that reads
-/// the shifted data as matrix A is ordered after the shift without further synchronization.
+/// the shifted data as matrix A or as sparsity metadata is ordered after the shift without further
+/// synchronization.
 ///
 /// Requires `sm_100a`, `sm_101a`, `sm_103a` or `sm_110a`.
 ///
@@ -128,8 +131,9 @@ pub unsafe fn copy<
 /// # Safety
 ///
 /// - The lane of `addr` must be a multiple of 32.
-/// - The 32 lanes × 256 bits starting at `addr` must lie within allocated Tensor Memory and must not be accessed by other
-///   operations until the shift has completed, except as allowed by pipelining.
+/// - The 32 lanes × 256 bits starting at `addr` must lie within allocated Tensor Memory and must
+///   not be accessed by other operations until the shift has completed, except as allowed by
+///   pipelining.
 /// - See also the [safety contract](super#safety-contract).
 #[cfg(any(
     target_feature = "sm_100a",

@@ -86,6 +86,11 @@ pub(crate) use {with_ftz, with_rounding};
 /// taking [`Denormals`] either preserve subnormal values or flush subnormal inputs and results
 /// to sign-preserving zero.
 ///
+/// Arithmetic methods are emitted with an explicit rounding modifier (e.g. `add.rn.f32`), which
+/// the PTX optimizer treats conservatively: separate multiplications and additions are never
+/// contracted into a fused multiply-add. Conversions to integers use the integer rounding
+/// modifiers (`.rni`, `.rzi`, `.rmi`, `.rpi`).
+///
 /// The `.approx` instructions (methods with the `_approx` suffix) trade accuracy for speed. Where
 /// the PTX ISA specifies an error bound, it is given in the method's documentation; some bounds
 /// only hold over a restricted input range.
@@ -93,7 +98,7 @@ pub trait F32Ext: Sized {
     /// Adds two `f32` values.
     ///
     /// `RND` selects the rounding mode, `DEN` the subnormal handling, and `SAT` optionally clamps
-    /// the result to `[0.0, 1.0]`.
+    /// the result to `[0.0, 1.0]` (NaN results become `+0.0`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add>
     fn add_with<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
@@ -110,8 +115,9 @@ pub trait F32Ext: Sized {
 
     /// Computes `self * b + c` with a single rounding.
     ///
-    /// `RND` selects the rounding mode, `DEN` the subnormal handling, and `SAT` optionally clamps
-    /// the result to `[0.0, 1.0]`.
+    /// The product is computed to infinite precision and `c` is added to it, also in infinite
+    /// precision, before rounding to `f32` with `RND`. `DEN` selects the subnormal handling, and
+    /// `SAT` optionally clamps the result to `[0.0, 1.0]` (NaN results become `+0.0`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-fma>
     fn fma<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
@@ -156,7 +162,8 @@ pub trait F32Ext: Sized {
     /// Takes a fast, approximate reciprocal.
     ///
     /// The maximum error is 1 ulp over the full range of inputs. Subnormal inputs and results are
-    /// flushed to zero (`rcp.approx.ftz`).
+    /// flushed to sign-preserving zero (`rcp.approx.ftz`). `±0.0` maps to `±inf`, `±inf` to
+    /// `±0.0` and NaN to NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-rcp>
     fn rcp_approx_ftz(self) -> f32;
@@ -171,7 +178,8 @@ pub trait F32Ext: Sized {
     /// Takes a fast, approximate square root (`sqrt.approx`).
     ///
     /// The maximum relative error over the entire positive finite range is 2^-23. `DEN` selects
-    /// the subnormal handling.
+    /// the subnormal handling. Negative non-zero inputs and `-inf` give NaN, and `±0.0` gives
+    /// `±0.0`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-sqrt>
     fn sqrt_approx<const DEN: Denormals>(self) -> f32;
@@ -179,7 +187,8 @@ pub trait F32Ext: Sized {
     /// Takes a fast, approximate reciprocal square root (`rsqrt.approx`).
     ///
     /// The maximum relative error over the entire positive finite range is 2^-22.9. `DEN` selects
-    /// the subnormal handling.
+    /// the subnormal handling. Negative inputs and `-inf` give NaN, `±0.0` gives `±inf` and `+inf`
+    /// gives `+0.0`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-rsqrt>
     fn rsqrt_approx<const DEN: Denormals>(self) -> f32;
@@ -188,7 +197,7 @@ pub trait F32Ext: Sized {
     ///
     /// The maximum absolute error is 2^-20.5 in the range `-2 * pi ..= 2 * pi` and 2^-14.7 in
     /// the range `-100 * pi ..= 100 * pi`. Outside of the latter, there is no error guarantee.
-    /// `DEN` selects the subnormal handling.
+    /// `±inf` gives NaN. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-sin>
     fn sin_approx<const DEN: Denormals>(self) -> f32;
@@ -197,7 +206,7 @@ pub trait F32Ext: Sized {
     ///
     /// The maximum absolute error is 2^-20.4 in the range `-2 * pi ..= 2 * pi` and 2^-14.7 in
     /// the range `-100 * pi ..= 100 * pi`. Outside of the latter, there is no error guarantee.
-    /// `DEN` selects the subnormal handling.
+    /// `±inf` gives NaN. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-cos>
     fn cos_approx<const DEN: Denormals>(self) -> f32;
@@ -205,7 +214,8 @@ pub trait F32Ext: Sized {
     /// Computes the base-2 logarithm, approximately (`lg2.approx`).
     ///
     /// The maximum absolute error is 2^-22 for inputs in `(0.5, 2)`; for other positive finite
-    /// inputs, the maximum relative error is 2^-22. `DEN` selects the subnormal handling.
+    /// inputs, the maximum relative error is 2^-22. Negative non-zero inputs and `-inf` give NaN,
+    /// and `±0.0` gives `-inf`. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-lg2>
     fn log2_approx<const DEN: Denormals>(self) -> f32;
@@ -213,14 +223,14 @@ pub trait F32Ext: Sized {
     /// Computes the base-2 exponential `2^self`, approximately (`ex2.approx`).
     ///
     /// The maximum error is 2 ulp from the correctly rounded result over the full range of
-    /// inputs. `DEN` selects the subnormal handling.
+    /// inputs. `-inf` gives `+0.0` and `+inf` gives `+inf`. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-ex2>
     fn exp2_approx<const DEN: Denormals>(self) -> f32;
 
     /// Computes the absolute value.
     ///
-    /// `DEN` selects the subnormal handling.
+    /// `DEN` selects the subnormal handling. A NaN input yields an unspecified NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-abs>
     fn abs_with<const DEN: Denormals>(self) -> f32;
@@ -228,12 +238,12 @@ pub trait F32Ext: Sized {
     /// Finds the minimum of two values.
     ///
     /// `-0.0` is treated as less than `+0.0`. `NAN` selects whether a NaN input is ignored
-    /// ([`NanHandling::Ignore`]) or propagated ([`NanHandling::Propagate`]). `DEN` selects the
-    /// subnormal handling.
+    /// ([`NanHandling::Ignore`]) or propagated ([`NanHandling::Propagate`], which yields a
+    /// canonical NaN if either input is NaN). `DEN` selects the subnormal handling.
     ///
     /// With `XOR` set to [`XorSignAbs::Enabled`] (`min.xorsign.abs`), the magnitude of the result
     /// is the minimum of the absolute values of the inputs, and its sign is the XOR of the input
-    /// signs. This requires `sm_86`.
+    /// signs (the sign handling is skipped if the result is NaN). This requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-min>
     fn min_with<const DEN: Denormals, const NAN: NanHandling, const XOR: XorSignAbs>(
@@ -244,12 +254,12 @@ pub trait F32Ext: Sized {
     /// Finds the maximum of two values.
     ///
     /// `+0.0` is treated as greater than `-0.0`. `NAN` selects whether a NaN input is ignored
-    /// ([`NanHandling::Ignore`]) or propagated ([`NanHandling::Propagate`]). `DEN` selects the
-    /// subnormal handling.
+    /// ([`NanHandling::Ignore`]) or propagated ([`NanHandling::Propagate`], which yields a
+    /// canonical NaN if either input is NaN). `DEN` selects the subnormal handling.
     ///
     /// With `XOR` set to [`XorSignAbs::Enabled`] (`max.xorsign.abs`), the magnitude of the result
     /// is the maximum of the absolute values of the inputs, and its sign is the XOR of the input
-    /// signs. This requires `sm_86`.
+    /// signs (the sign handling is skipped if the result is NaN). This requires `sm_86`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-max>
     fn max_with<const DEN: Denormals, const NAN: NanHandling, const XOR: XorSignAbs>(
@@ -275,15 +285,15 @@ pub trait F32Ext: Sized {
 
     /// Converts to a signed 64-bit integer, rounding to an integer with `RND`.
     ///
-    /// Out-of-range values saturate to `i64::MIN` / `i64::MAX`, and NaN becomes zero. If `DEN`
-    /// is [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
+    /// Out-of-range values saturate to `i64::MIN` / `i64::MAX`, and NaN becomes `i64::MIN`. If
+    /// `DEN` is [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
     fn to_i64<const RND: Rounding, const DEN: Denormals>(self) -> i64;
 
     /// Converts to an unsigned 64-bit integer, rounding to an integer with `RND`.
     ///
-    /// Out-of-range values saturate to `0` / `u64::MAX`, and NaN becomes zero. If `DEN` is
+    /// Out-of-range values saturate to `0` / `u64::MAX`, and NaN becomes `1 << 63`. If `DEN` is
     /// [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
@@ -307,12 +317,14 @@ pub trait F32Ext: Sized {
 
     /// Converts to the `tf32` format, returning its bit pattern stored in an `f32`.
     ///
-    /// The result has the low 13 mantissa bits cleared, so it can be used directly as an `f32`
-    /// operand of `tf32` tensor core instructions.
+    /// The PTX ISA leaves the internal layout of `tf32` implementation defined, so the result
+    /// should only be passed to consumers of `tf32` values, such as `tf32` tensor core
+    /// instructions, rather than used in `f32` arithmetic.
     ///
     /// `RND` must be [`Rounding::NearestEven`], [`Rounding::TowardZero`] or
-    /// [`Rounding::NearestAway`]. `RELU` clamps negative results to zero and `SAT` clamps
-    /// out-of-range results to the largest finite `tf32` value.
+    /// [`Rounding::NearestAway`]. `RELU` clamps negative results to zero (NaN results become
+    /// canonical NaN) and `SAT` clamps results whose magnitude exceeds the largest finite `tf32`
+    /// value to that value, keeping the sign (NaN inputs still produce NaN).
     ///
     /// [`Rounding::NearestAway`] requires `sm_80` and does not support `RELU`. The other roundings
     /// require `sm_90`, and combining them with [`Overflow::SaturateFinite`] additionally requires

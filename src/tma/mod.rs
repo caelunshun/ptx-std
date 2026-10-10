@@ -14,18 +14,28 @@
 //! Copies into shared memory complete asynchronously and signal their completion on an
 //! [`MBarrier`](crate::MBarrier): the barrier must be told beforehand how many bytes to expect
 //! (via its `expect_tx` operation), and the copy performs a complete-transaction on it once the
-//! data has landed in shared memory.
+//! data has landed in shared memory. The complete-transaction has release semantics at cluster
+//! scope, so the data is visible to threads that observe the completion of the barrier phase.
 //!
 //! Copies out of shared memory (stores, reductions) are tracked using *bulk async-groups*
 //! instead: `bulk_commit_group` closes the group of copies issued so far by the executing
 //! thread, and `bulk_wait_group` waits for committed groups to complete. Bulk async-groups
-//! cover both the non-tensor and tensor shared-to-global copies.
+//! cover both the non-tensor and tensor shared-to-global copies. Prefetches have no completion
+//! mechanism.
+//!
+//! Each thread that executes a copy operation issues its own copy: to perform a single copy,
+//! execute the operation in one (elected) thread only.
 //!
 //! # Proxies
 //!
 //! TMA operations are performed by the *async proxy*. Writes to shared memory through the generic
-//! proxy (ordinary stores) must be made visible to it with a proxy fence (`fence.proxy.async`) before a TMA store reads them, and likewise for global
-//! memory written by ordinary stores and later read by a TMA load.
+//! proxy (ordinary stores) must be made visible to it with a proxy fence (`fence.proxy.async`)
+//! before a TMA store reads them, and likewise for global memory written by ordinary stores and
+//! later read by a TMA load. The completion of a copy is followed by an implicit generic-async
+//! proxy fence, so its results are visible to the generic proxy as soon as the completion has been
+//! observed.
+//!
+//! Tensor maps are read through yet another proxy, the *tensormap proxy*; see [`TmaDescriptor`].
 
 #[allow(unused_macros)]
 macro_rules! with_cache_policy {
@@ -169,7 +179,8 @@ pub enum BulkWait {
     /// Wait until the groups have fully completed: their writes are performed and visible to the
     /// executing thread.
     Completion,
-    /// Wait only until the groups have finished *reading* their source memory (`.read`).
+    /// Wait only until the groups have finished *reading* their source memory and, for tensor
+    /// copies, the tensor map (`.read`).
     ///
     /// The source shared memory may be reused afterwards, but the writes to the destination are
     /// not necessarily complete or visible.
@@ -182,6 +193,8 @@ pub enum BulkWait {
 /// Bulk async-groups track the shared-to-global bulk copies ([`bulk_store`],
 /// [`bulk_store_masked`]) and the tensor stores and reductions ([`tma_store_tile`],
 /// [`tma_reduce_tile`], ...). Loads into shared memory are tracked by mbarriers instead.
+/// If there are no uncommitted operations, an empty group is created. The groups are per-thread,
+/// and there is no ordering between the operations of a group.
 ///
 /// Requires `sm_90`.
 ///
@@ -195,8 +208,9 @@ pub fn bulk_commit_group() {
 /// Waits until at most `N` of the most recently committed bulk async-groups of the executing
 /// thread are pending (`cp.async.bulk.wait_group`).
 ///
-/// With [`BulkWait::SourceRead`], only waits until the pending groups have finished reading their
-/// source shared memory (`.read`). `N = 0` waits for all committed groups.
+/// All committed groups older than the `N` most recent ones are complete when the function
+/// returns, so `N = 0` waits for all committed groups. With [`BulkWait::SourceRead`], only waits
+/// until the groups have finished reading their source shared memory and tensor map (`.read`).
 ///
 /// Requires `sm_90`.
 ///
@@ -209,16 +223,17 @@ pub fn bulk_wait_group<const N: u32, const WAIT: BulkWait>() {
     })
 }
 
-/// Prefetches the tensor map `tmap` into the tensor map cache (`prefetch.tensormap`), so that
+/// Prefetches the cache line containing the tensor map `tmap` (`prefetch.tensormap`), so that
 /// later TMA operations using it start faster.
 ///
 /// Requires `sm_90`.
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch-tensormap>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-prefetch-prefetchu>
 ///
 /// # Safety
 ///
-/// `tmap` must reside in constant, kernel parameter, or global memory.
+/// `tmap` must reside in constant or kernel parameter memory: the PTX ISA only specifies the
+/// prefetch for tensor maps in these state spaces.
 #[cfg(target_feature = "sm_90")]
 #[inline]
 pub unsafe fn prefetch_tensormap(tmap: &TmaDescriptor) {

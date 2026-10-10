@@ -15,6 +15,8 @@ use crate::{MBarrier, modifiers::CtaGroup, tma::CtaMask};
 /// accessed by the prior operations. It also prevents the compiler from moving prior `tcgen05`
 /// operations below it.
 ///
+/// Requires `sm_100f`, `sm_101f` or `sm_110f`.
+///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-special-sync-operations-fence>
 #[inline(always)]
 pub fn fence_before_thread_sync() {
@@ -29,6 +31,8 @@ pub fn fence_before_thread_sync() {
 /// Used by a thread after synchronizing with other threads whose prior Tensor Memory accesses must
 /// be ordered before the subsequent operations. It also prevents the compiler from moving
 /// subsequent `tcgen05` operations above it.
+///
+/// Requires `sm_100f`, `sm_101f` or `sm_110f`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-special-sync-operations-fence>
 #[inline(always)]
@@ -79,8 +83,9 @@ pub unsafe fn commit<const CTA_GROUP: CtaGroup>(mbar: &MBarrier) {
 /// as `mbar` in the shared memory of each CTA selected by `ctas`
 /// (`tcgen05.commit.cta_group::N.mbarrier::arrive::one.multicast::cluster.b64`).
 ///
-/// Bit `i` of `ctas` selects the CTA with `%cluster_ctarank` `i`. `mbar` itself is only signaled
-/// if the executing CTA is selected.
+/// Bit `i` of `ctas` selects the CTA with `%cluster_ctarank` `i`; the mask is 16 bits wide. `mbar`
+/// only determines the offset of the signaled barriers: the barrier at that offset in the
+/// executing CTA is signaled only if the executing CTA is selected.
 ///
 /// Requires `sm_100f`, `sm_101f` or `sm_110f`.
 ///

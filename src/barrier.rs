@@ -16,7 +16,9 @@ use core::{arch::nvptx as nv, marker::ConstParamTy};
 ///
 /// The aligned form can be cheaper, but is undefined behavior if the threads of a warp reach the
 /// barrier through different control flow paths: in conditionally executed code, it must only be
-/// used if all threads of the warp evaluate the condition identically.
+/// used if all threads evaluate the condition identically. (The PTX specification words this as
+/// all threads in the CTA executing the same barrier instruction; at the very least, all threads
+/// of a warp must.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum BarrierAlignment {
     /// The threads of a warp may reach the barrier from different, diverged code paths.
@@ -37,11 +39,18 @@ pub const NAMED_BARRIER_COUNT: u32 = 16;
 /// different barrier ids for independent groups of warps (e.g. in warp-specialized kernels)
 /// allows them to synchronize independently.
 ///
-/// Memory ordering: `sync*` operations guarantee that all memory accesses requested by the
-/// participating threads prior to the barrier are performed relative to all participating
-/// threads, whereas [`arrive`](Self::arrive) does not order the executing thread's prior
-/// accesses with respect to threads that wait.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Memory ordering: all operations on a barrier (`sync*`, `arrive` and the reductions) guarantee
+/// that, when the barrier completes, the memory accesses requested by the executing thread prior
+/// to the barrier operation are performed relative to all threads participating in the barrier.
+/// The `sync*` and reduction operations further guarantee that the executing thread requests no
+/// new memory access before the barrier completes; [`arrive`](Self::arrive) does not wait, so it
+/// gives no such guarantee.
+///
+/// When a barrier completes, the waiting threads are restarted and the barrier is reset so it
+/// can be reused immediately. Care must be taken that a warp does not execute more barrier
+/// operations than intended on a barrier before it is reset (an `arrive` followed by any other
+/// operation on the same barrier). The reduction operations (`sync_and_*`) must not be mixed
+/// with `sync` or `arrive` operations on the same active barrier: execution is unpredictable.#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NamedBarrier(u32);
 
@@ -70,7 +79,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until all non-exited threads of the CTA have arrived (or arrived
-    /// with [`arrive`](Self::arrive)).
+    /// with [`arrive`](Self::arrive)) (`barrier.sync`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -87,7 +96,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until `num_threads` threads have arrived (or arrived with
-    /// [`arrive`](Self::arrive)).
+    /// [`arrive`](Self::arrive)) (`barrier.sync` with a thread count).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -105,7 +114,7 @@ impl NamedBarrier {
     }
 
     /// Signals the arrival of the executing threads at the barrier, which expects `num_threads`
-    /// threads in total, without waiting for the other threads.
+    /// threads in total, without waiting for the other threads (`barrier.arrive`).
     ///
     /// Typically used by producer warps to notify consumer warps that wait with
     /// [`sync_among`](Self::sync_among).
@@ -125,7 +134,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until all non-exited threads of the CTA have arrived, and returns the
-    /// number of threads for which `predicate` is true.
+    /// number of threads for which `predicate` is true (`barrier.red.popc`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -140,7 +149,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until `num_threads` threads have arrived, and returns the number of
-    /// those threads for which `predicate` is true.
+    /// those threads for which `predicate` is true (`barrier.red.popc` with a thread count).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -159,7 +168,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until all non-exited threads of the CTA have arrived, and returns
-    /// whether `predicate` is true for all of them.
+    /// whether `predicate` is true for all of them (`barrier.red.and`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -174,7 +183,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until `num_threads` threads have arrived, and returns whether
-    /// `predicate` is true for all of them.
+    /// `predicate` is true for all of them (`barrier.red.and` with a thread count).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -197,7 +206,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until all non-exited threads of the CTA have arrived, and returns
-    /// whether `predicate` is true for any of them.
+    /// whether `predicate` is true for any of them (`barrier.red.or`).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///
@@ -212,7 +221,7 @@ impl NamedBarrier {
     }
 
     /// Waits at the barrier until `num_threads` threads have arrived, and returns whether
-    /// `predicate` is true for any of them.
+    /// `predicate` is true for any of them (`barrier.red.or` with a thread count).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar>
     ///

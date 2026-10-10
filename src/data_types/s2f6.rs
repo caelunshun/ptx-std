@@ -7,7 +7,8 @@ use bytemuck::{Pod, Zeroable};
 /// fractional bits (`xx.xxxxxx`): the value of an element is `bits as i8 * 2^-6`, ranging from
 /// `-2.0` to `127 * 2^-6 = 1.984375`. Element 0 occupies the low 8 bits.
 ///
-/// The only supported conversions are the up-conversions to [`bf16x2`](crate::bf16x2).
+/// The format has no infinity or NaN. Only the up-conversions to [`bf16x2`](crate::bf16x2) are
+/// currently exposed; they require `sm_100a`, `sm_103a`, `sm_110a`, `sm_120a` or `sm_121a`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#fixed-point-data-formats>
 #[derive(Clone, Copy, Pod, Zeroable)]

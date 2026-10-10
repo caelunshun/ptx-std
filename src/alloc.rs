@@ -23,8 +23,9 @@ const MALLOC_ALIGN: usize = 16;
 ///
 /// Allocations return null if the device heap is exhausted. The heap size can be configured from
 /// the host with the `cudaLimitMallocHeapSize` limit (8 MiB by default). Memory allocated by one
-/// thread can be used and freed by any other thread, and stays allocated until freed, even
-/// across kernel launches.
+/// thread can be used and freed by any other thread, and stays allocated until freed (or until
+/// the context is destroyed), even across kernel launches. Memory allocated on the device
+/// cannot be freed from the host with `cudaFree`.
 ///
 /// `malloc` guarantees an alignment of 16 bytes. Layouts requiring a larger alignment are
 /// supported by over-allocating and storing the pointer returned by `malloc` just before the

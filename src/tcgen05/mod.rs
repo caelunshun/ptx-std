@@ -24,7 +24,7 @@
 //! shared memory. The number of columns must be a power of two in `32..=512`. All Tensor Memory
 //! allocated by a kernel must be deallocated with [`dealloc`] before the kernel exits, and a CTA
 //! that does not need to allocate anymore should call [`relinquish_alloc_permit`] so that other
-//! CTAs resident on the SM can allocate.
+//! CTAs resident on the SM can allocate (it is illegal for the CTA to allocate afterwards).
 //!
 //! Threads move data between registers and Tensor Memory with [`load`] and [`store`] (and their
 //! variants). A warp can only access a quarter of the lanes: the warp with index `w` in the CTA
@@ -32,6 +32,8 @@
 //! lanes. All columns are accessible to every warp.
 //!
 //! <https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-memory>
+//!
+//! <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-tensor-memory-ld-st-access-restrictions>
 //!
 //! # CTA groups and issue granularity
 //!
@@ -314,7 +316,7 @@ impl TmemAddr {
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-matrix-shape>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ConstParamTy)]
 pub enum MmaKind {
-    /// `.kind::f16`: A and B are `f16` or `bf16`, D is `f16` or `f32`.
+    /// `.kind::f16`: A and B are `f16` or `bf16`, D is `f32` (or `f16` if A and B are `f16`).
     F16,
     /// `.kind::tf32`: A and B are `tf32`, D is `f32`.
     Tf32,
@@ -329,7 +331,7 @@ pub enum MmaKind {
     /// `.kind::mxf4`: block-scaled `e2m1` A and B with `ue8m0` scale factors, D is `f32`.
     Mxf4,
     /// `.kind::mxf4nvf4`: block-scaled `e2m1` A and B with `ue8m0`, `ue4m3` or `ue5m3` scale
-    /// factors, D is `f32`.
+    /// factors (see [`Nvf4ScaleType`]), D is `f32`.
     Mxf4nvf4,
 }
 

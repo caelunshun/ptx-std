@@ -13,8 +13,11 @@ pub const WARP_SIZE: u32 = 32;
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
 #[repr(C)]
 pub struct Dim3 {
+    /// The extent or index in the x dimension, which varies fastest in linear orderings.
     pub x: u32,
+    /// The extent or index in the y dimension.
     pub y: u32,
+    /// The extent or index in the z dimension.
     pub z: u32,
 }
 
@@ -62,6 +65,9 @@ impl From<Dim3> for [u32; 3] {
 
 /// Returns the index of the executing thread within its block (`%tid`).
 ///
+/// Components in unused dimensions are 0, and each component is less than the corresponding
+/// component of [`block_dim`].
+///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-tid>
 #[inline(always)]
 pub fn thread_id() -> Dim3 {
@@ -69,6 +75,8 @@ pub fn thread_id() -> Dim3 {
 }
 
 /// Returns the dimensions of the block, in threads (`%ntid`).
+///
+/// All components are non-zero. The maximum is 1024 for `x` and `y` and 64 for `z`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-ntid>
 #[inline(always)]
@@ -78,6 +86,8 @@ pub fn block_dim() -> Dim3 {
 
 /// Returns the index of the executing block within the grid (`%ctaid`).
 ///
+/// Each component is less than the corresponding component of [`grid_dim`].
+///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-ctaid>
 #[inline(always)]
 pub fn block_id() -> Dim3 {
@@ -85,6 +95,8 @@ pub fn block_id() -> Dim3 {
 }
 
 /// Returns the dimensions of the grid, in blocks (`%nctaid`).
+///
+/// All components are at least 1. The maximum is 2^31 - 1 for `x` and 65535 for `y` and `z`.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-nctaid>
 #[inline(always)]
@@ -134,14 +146,15 @@ pub fn lane_id() -> u32 {
 
 /// Returns the number of threads in a warp (`WARP_SZ`). This is always [`WARP_SIZE`].
 ///
-/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-wsize>
+/// <https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-constants>
 #[inline(always)]
 pub fn warp_size() -> u32 {
     unsafe { nv::warpsize() }
 }
 
 /// Returns the identifier of the hardware warp slot the executing thread occupies in its block
-/// (`%warpid`).
+/// (`%warpid`). It is unique among the warps of a block but not across blocks, and is the same
+/// for all threads of a warp.
 ///
 /// The value may change during execution, e.g. due to preemption, and is not necessarily
 /// contiguous; it is intended for profiling and diagnostics only. Use [`warp_id`] for
@@ -153,7 +166,8 @@ pub fn hardware_warp_id() -> u32 {
     unsafe { nv::warpid() }
 }
 
-/// Returns the maximum number of hardware warp identifiers (`%nwarpid`).
+/// Returns the maximum number of hardware warp identifiers (`%nwarpid`), i.e. an upper bound on
+/// the values returned by [`hardware_warp_id`].
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-nwarpid>
 #[inline(always)]
@@ -186,6 +200,9 @@ pub fn max_sm_ids() -> u32 {
 /// Returns the temporal grid launch number of the executing grid (`%gridid`), truncated to
 /// 32 bits.
 ///
+/// `%gridid` is a 64-bit register that is mainly used by debuggers to distinguish CTAs and
+/// clusters of concurrent grids.
+///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-gridid>
 #[inline(always)]
 pub fn grid_id() -> u32 {
@@ -193,6 +210,8 @@ pub fn grid_id() -> u32 {
 }
 
 /// Returns the index of the executing thread block cluster within the grid (`%clusterid`).
+///
+/// Each component is less than the corresponding component of [`grid_dim_in_clusters`].
 ///
 /// Requires `sm_90`.
 ///
@@ -215,6 +234,8 @@ pub fn grid_dim_in_clusters() -> Dim3 {
 }
 
 /// Returns the index of the executing block within its cluster (`%cluster_ctaid`).
+///
+/// Each component is less than the corresponding component of [`cluster_dim`].
 ///
 /// Requires `sm_90`.
 ///
@@ -248,7 +269,8 @@ pub fn cluster_dim() -> Dim3 {
     }
 }
 
-/// Returns the linear rank of the executing block within its cluster (`%cluster_ctarank`).
+/// Returns the linear rank of the executing block within its cluster (`%cluster_ctarank`), in
+/// `0..cluster_size()`.
 ///
 /// This is the rank used to address a block's shared memory with `mapa` and to select
 /// multicast destinations.
@@ -273,7 +295,8 @@ pub fn cluster_size() -> u32 {
     unsafe { nv::cluster_nctarank() }
 }
 
-/// Returns whether the grid was launched with an explicit cluster size (`%is_explicit_cluster`).
+/// Returns whether the cluster launch was explicitly specified by the user
+/// (`%is_explicit_cluster`).
 ///
 /// Requires `sm_90`.
 ///
@@ -284,8 +307,11 @@ pub fn is_explicit_cluster() -> bool {
     unsafe { nv::is_explicit_cluster() }
 }
 
-/// Returns the total shared memory allocated for the block at launch, in bytes, excluding memory
-/// reserved for system software (`%total_smem_size`).
+/// Returns the total shared memory allocated (statically and dynamically) for the block at launch,
+/// in bytes, excluding memory reserved for system software (`%total_smem_size`).
+///
+/// The value is a multiple of the shared memory allocation unit size of the target architecture
+/// (128 bytes on `sm_8x` and newer).
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-total-smem-size>
 #[inline(always)]
@@ -293,8 +319,8 @@ pub fn total_smem_size() -> u32 {
     unsafe { nv::total_smem_size() }
 }
 
-/// Returns the total shared memory allocated for the block at launch, in bytes, including memory
-/// reserved for system software (`%aggr_smem_size`).
+/// Returns the total shared memory allocated (statically and dynamically) for the block at launch,
+/// in bytes, plus the memory reserved for system software (`%aggr_smem_size`).
 ///
 /// Requires `sm_90`.
 ///
@@ -352,7 +378,8 @@ fn shared_offset_to_generic(offset: u32) -> *mut u8 {
 /// Returns a generic pointer to the start of the shared memory region reserved for system
 /// software (`%reserved_smem_offset_begin`).
 ///
-/// This memory is not available to user code; the pointer is only useful for comparisons.
+/// This memory is not available to user code and accessing it is undefined behavior; the pointer
+/// is only useful for comparisons.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-reserved-smem>
 #[inline(always)]
@@ -393,7 +420,9 @@ pub fn reserved_smem_offset<const N: u32>() -> *mut u8 {
     shared_offset_to_generic(unsafe { nv::reserved_smem_offset::<N>() })
 }
 
-/// Reads the driver-defined read-only register `%envreg<N>` (`N < 32`).
+/// Reads the driver-defined read-only register `%envreg<N>` (`N < 32`). These registers are
+/// initialized by the driver before launch and can hold CTA-wide or grid-wide values; their
+/// meaning is defined in the driver documentation.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-envreg-32>
 #[inline(always)]
