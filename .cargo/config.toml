@@ -1,0 +1,5 @@
+[target.nvptx64-nvidia-cuda]
+rustflags = ["-C", "target-feature=+ptx93,+sm_80"]
+
+[build]
+target = "nvptx64-nvidia-cuda"

@@ -1,0 +1,1 @@
+//! CTA-scoped hardware barriers (non-mbarrier)
