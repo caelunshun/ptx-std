@@ -4,5 +4,7 @@
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dim3 {
-    pub x: u32, pub y: u32, pub z: u32,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
 }

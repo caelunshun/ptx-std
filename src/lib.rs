@@ -1,4 +1,4 @@
-#![feature(stdarch_nvptx)]
+#![feature(stdarch_nvptx, const_param_ty_trait, )]
 #![no_std]
 
 #[cfg(not(target_arch = "nvptx64"))]
@@ -10,12 +10,13 @@ compile_error!("this crate requires a minimum of PTX 9.3 enabled via target_feat
 #[cfg(not(target_feature = "sm_80"))]
 compile_error!("this crate requires an Ampere (sm_80) or later GPU target");
 
+mod barrier;
 mod data_types;
 mod globals;
 mod mbarrier;
-mod barrier;
-mod tma;
 mod memory;
+mod tma;
+mod warp_collectives;
 
 pub use data_types::*;
 pub use globals::*;
