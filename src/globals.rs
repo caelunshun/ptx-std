@@ -329,33 +329,24 @@ global_asm!(".extern .shared .align 1024 .b8 __ptx_std_dynamic_smem[];");
 /// static shared memory counts toward its shared memory usage.
 ///
 /// Every call returns the same pointer, so all users of dynamic shared memory in a kernel must
-/// partition the region among themselves. The memory is uninitialized.
+/// partition the region among themselves. The memory begins uninitialized.
 #[inline(always)]
 pub fn dynamic_smem_start() -> *mut u8 {
-    let ptr: *mut u8;
+    let offset: u32;
     unsafe {
         asm!(
-            "cvta.shared.u64 {}, __ptx_std_dynamic_smem;",
-            out(reg64) ptr,
+            "mov.u32 {}, __ptx_std_dynamic_smem;",
+            out(reg32) offset,
             options(pure, nomem, nostack, preserves_flags),
         );
     }
-    ptr
+    shared_offset_to_generic(offset)
 }
 
 /// Converts an offset within the shared memory window to a generic pointer.
 #[inline(always)]
 fn shared_offset_to_generic(offset: u32) -> *mut u8 {
-    let ptr: *mut u8;
-    unsafe {
-        asm!(
-            "cvta.shared.u64 {}, {};",
-            out(reg64) ptr,
-            in(reg64) offset as u64,
-            options(pure, nomem, nostack, preserves_flags),
-        );
-    }
-    ptr
+    nv::shared_offset_to_ptr(offset)
 }
 
 /// Returns a generic pointer to the start of the shared memory region reserved for system
