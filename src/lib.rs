@@ -1,4 +1,5 @@
-#![feature(stdarch_nvptx, const_param_ty_trait, )]
+#![feature(stdarch_nvptx, asm_experimental_arch, adt_const_params, f16)]
+#![allow(incomplete_features)]
 #![no_std]
 
 #[cfg(not(target_arch = "nvptx64"))]
@@ -10,15 +11,32 @@ compile_error!("this crate requires a minimum of PTX 9.3 enabled via target_feat
 #[cfg(not(target_feature = "sm_80"))]
 compile_error!("this crate requires an Ampere (sm_80) or later GPU target");
 
-mod barrier;
+#[macro_use]
+mod macros;
+
+pub mod alloc;
+pub mod barrier;
+pub mod cluster;
+pub mod cp_async;
 mod data_types;
+pub mod debug;
+pub mod fence;
 mod globals;
+pub mod launch;
 mod mbarrier;
-mod memory;
-mod tma;
-mod warp_collectives;
+pub mod memory;
+mod modifiers;
+#[cfg(any(
+    target_feature = "sm_100f",
+    target_feature = "sm_101f",
+    target_feature = "sm_110f"
+))]
+pub mod tcgen05;
+pub mod time;
+pub mod tma;
+pub mod warp_collectives;
 
 pub use data_types::*;
 pub use globals::*;
 pub use mbarrier::*;
-pub use tma::*;
+pub use modifiers::*;

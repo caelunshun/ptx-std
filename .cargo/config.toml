@@ -1,5 +1,14 @@
 [target.nvptx64-nvidia-cuda]
-rustflags = ["-C", "target-feature=+ptx93,+sm_80"]
+rustflags = ["-C", "target-feature=+ptx93,+sm_103a", "-C", "target-cpu=sm_103a"]
+rustdocflags = [
+    "-C",
+    "target-feature=+ptx93,+sm_103a",
+    "-C",
+    "target-cpu=sm_103a",
+]
 
 [build]
 target = "nvptx64-nvidia-cuda"
+
+[unstable]
+build-std = ["core", "compiler_builtins"]
