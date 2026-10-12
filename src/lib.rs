@@ -9,7 +9,14 @@
 //!
 //! The PTX ISA reference is at <https://docs.nvidia.com/cuda/parallel-thread-execution/>.
 
-#![feature(stdarch_nvptx, asm_experimental_arch, adt_const_params, f16)]
+#![feature(
+    stdarch_nvptx,
+    asm_experimental_arch,
+    adt_const_params,
+    f16,
+    loop_hints,
+    portable_simd
+)]
 #![allow(incomplete_features)]
 #![no_std]
 

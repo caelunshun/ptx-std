@@ -7,6 +7,7 @@
 
 #![no_std]
 #![feature(abi_ptx)]
+#![cfg_attr(target_feature = "sm_90", feature(portable_simd))]
 #![allow(clippy::missing_safety_doc)]
 
 use ptx_std::{
@@ -162,23 +163,23 @@ rmw_kernel!(rmw_f16x2, f16x2, [Generic Global SharedCta], add);
 #[cfg(target_feature = "sm_90")]
 mod sm90 {
     use super::*;
+    use core::simd::Simd;
+    use ptx_std::{bf16x4, bf16x8, f16x4, f16x8};
 
     rmw_kernel!(rmw_bf16, bf16, [Generic Global SharedCta SharedCluster], add);
     rmw_kernel!(rmw_bf16x2, bf16x2, [Generic Global SharedCta SharedCluster], add);
     rmw_kernel!(rmw_f32_cluster, f32, [SharedCluster], add);
     rmw_kernel!(rmw_u32_cluster, u32, [SharedCluster], add min max and or xor inc dec);
-    rmw_kernel!(rmw_v2_f16, [f16; 2], [Generic Global], add min max);
-    rmw_kernel!(rmw_v4_f16, [f16; 4], [Generic Global], add min max);
-    rmw_kernel!(rmw_v8_f16, [f16; 8], [Generic Global], add min max);
-    rmw_kernel!(rmw_v2_bf16, [bf16; 2], [Generic Global], add min max);
-    rmw_kernel!(rmw_v4_bf16, [bf16; 4], [Generic Global], add min max);
-    rmw_kernel!(rmw_v8_bf16, [bf16; 8], [Generic Global], add min max);
-    rmw_kernel!(rmw_v2_f16x2, [f16x2; 2], [Generic Global], add min max);
-    rmw_kernel!(rmw_v4_f16x2, [f16x2; 4], [Generic Global], add min max);
-    rmw_kernel!(rmw_v2_bf16x2, [bf16x2; 2], [Generic Global], add min max);
-    rmw_kernel!(rmw_v4_bf16x2, [bf16x2; 4], [Generic Global], add min max);
-    rmw_kernel!(rmw_v2_f32, [f32; 2], [Generic Global], add);
-    rmw_kernel!(rmw_v4_f32, [f32; 4], [Generic Global], add);
+    // `f16x2` and `bf16x2` add in every state space (`.f16x2`), but min and max use the
+    // `.v2.f16` form, which requires global memory.
+    rmw_kernel!(rmw_f16x2_minmax, f16x2, [Generic Global], min max);
+    rmw_kernel!(rmw_bf16x2_minmax, bf16x2, [Generic Global], min max);
+    rmw_kernel!(rmw_f16x4, f16x4, [Generic Global], add min max);
+    rmw_kernel!(rmw_f16x8, f16x8, [Generic Global], add min max);
+    rmw_kernel!(rmw_bf16x4, bf16x4, [Generic Global], add min max);
+    rmw_kernel!(rmw_bf16x8, bf16x8, [Generic Global], add min max);
+    rmw_kernel!(rmw_f32x2, Simd<f32, 2>, [Generic Global], add);
+    rmw_kernel!(rmw_f32x4, Simd<f32, 4>, [Generic Global], add);
 }
 
 /// Instantiates `atom_exch` (if `exch` is given) and `atom_cas` for `$ty`.

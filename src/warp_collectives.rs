@@ -14,6 +14,7 @@
 //! compiler may in principle move these operations across control flow; keep the operation and
 //! the control flow that determines which lanes reach it straightforward.
 
+use crate::data_types::array_from_fn;
 #[cfg(target_feature = "sm_100f")]
 use crate::modifiers::NanHandling;
 use bytemuck::{Pod, Zeroable};
@@ -22,6 +23,7 @@ use core::{
     marker::ConstParamTy,
     mem::size_of,
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not},
+    simd::Simd,
 };
 
 /// A set of lanes of a warp, with bit `i` standing for lane `i`.
@@ -285,24 +287,79 @@ const fn shuffle_clamp_operand(mode: ShuffleMode, width: u32) -> u32 {
     }
 }
 
-/// Applies `f` to every 32-bit word of `value`.
+/// Applies `f` to every 32-bit word of `value`. A final partial word is zero-extended before it is
+/// passed to `f`, and only its low bytes are kept from the result.
 #[inline(always)]
 fn map_words<T: Pod>(value: T, mut f: impl FnMut(u32) -> u32) -> T {
-    const {
-        assert!(
-            size_of::<T>() != 0 && size_of::<T>().is_multiple_of(4),
-            "shuffled types must have a size that is a non-zero multiple of 4 bytes"
-        )
-    };
+    const { assert!(size_of::<T>() != 0, "zero-sized types cannot be exchanged") };
     let mut out = T::zeroed();
-    let src = (&value as *const T).cast::<u32>();
-    let dst = (&mut out as *mut T).cast::<u32>();
+    let src = (&value as *const T).cast::<u8>();
+    let dst = (&mut out as *mut T).cast::<u8>();
+    let words = size_of::<T>() / 4;
     let mut i = 0;
-    while i < size_of::<T>() / 4 {
-        unsafe { dst.add(i).write_unaligned(f(src.add(i).read_unaligned())) };
+    #[rustc_unroll(full)]
+    while i < words {
+        unsafe {
+            let word = src.add(4 * i).cast::<u32>().read_unaligned();
+            dst.add(4 * i).cast::<u32>().write_unaligned(f(word));
+        }
         i += 1;
     }
+    let rem = size_of::<T>() % 4;
+    if rem != 0 {
+        let word = f(unsafe { read_partial_word(src.add(4 * words), rem) });
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (&word as *const u32).cast::<u8>(),
+                dst.add(4 * words),
+                rem,
+            )
+        };
+    }
     out
+}
+
+/// Reads `len < 4` bytes at `src` into the low bytes of a zeroed word.
+#[inline(always)]
+unsafe fn read_partial_word(src: *const u8, len: usize) -> u32 {
+    let mut word = 0u32;
+    unsafe { core::ptr::copy_nonoverlapping(src, (&mut word as *mut u32).cast::<u8>(), len) };
+    word
+}
+
+/// A chunk of a value compared by `match.sync`.
+enum MatchChunk {
+    B32(u32),
+    B64(u64),
+}
+
+/// Calls `f` on every 64-bit chunk of `value`, then on 32-bit chunks for the remaining bytes (a
+/// final partial chunk is zero-extended).
+#[inline(always)]
+fn for_each_match_chunk<T: Pod>(value: &T, mut f: impl FnMut(MatchChunk)) {
+    const { assert!(size_of::<T>() != 0, "zero-sized types cannot be matched") };
+    let src = (value as *const T).cast::<u8>();
+    let chunks = size_of::<T>() / 8;
+    let mut i = 0;
+    #[rustc_unroll(full)]
+    while i < chunks {
+        f(MatchChunk::B64(unsafe {
+            src.add(8 * i).cast::<u64>().read_unaligned()
+        }));
+        i += 1;
+    }
+    let mut offset = 8 * chunks;
+    if size_of::<T>() - offset >= 4 {
+        f(MatchChunk::B32(unsafe {
+            src.add(offset).cast::<u32>().read_unaligned()
+        }));
+        offset += 4;
+    }
+    if offset < size_of::<T>() {
+        f(MatchChunk::B32(unsafe {
+            read_partial_word(src.add(offset), size_of::<T>() - offset)
+        }));
+    }
 }
 
 /// Shuffles one 32-bit word.
@@ -358,9 +415,10 @@ unsafe fn shuffle_word_checked<const MODE: ShuffleMode, const WIDTH: u32>(
 ///
 /// If the source lane is not in `mask` or has exited, the received value is undefined.
 ///
-/// `T` may be any plain-data type whose size is a multiple of 4 bytes; larger values are shuffled
-/// one 32-bit word at a time. `WIDTH` must be a power of two in `1..=32`. See
-/// [`try_shuffle_segmented`] to distinguish the out-of-range case.
+/// `T` may be any non-zero-sized plain-data type, such as the scalar and vector floating-point types
+/// of this crate or `core::simd` vectors. It is shuffled one 32-bit word at a time; a final
+/// partial word (e.g. of a 1- or 2-byte type) is zero-extended. `WIDTH` must be a power of two in
+/// `1..=32`. See [`try_shuffle_segmented`] to distinguish the out-of-range case.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-shfl-sync>
 ///
@@ -563,7 +621,10 @@ pub unsafe fn ballot(mask: LaneMask, predicate: bool) -> LaneMask {
 /// Returns the set of non-exited threads in `mask` whose `value` is bitwise equal to the executing
 /// thread's (`match.any.sync`).
 ///
-/// `T` must be 4 or 8 bytes in size; floating-point values are compared by bit pattern.
+/// `T` may be any non-zero-sized plain-data type; floating-point values are compared by bit
+/// pattern. Values are compared in 64-bit chunks with `match.any.sync.b64`, and the remaining bytes
+/// in 32-bit chunks with `match.any.sync.b32` (a final partial chunk is zero-extended); the result is the intersection of
+/// the lane sets of all chunks.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-match-sync>
 ///
@@ -573,26 +634,25 @@ pub unsafe fn ballot(mask: LaneMask, predicate: bool) -> LaneMask {
 /// execute the same match with the same `mask`.
 #[inline(always)]
 pub unsafe fn match_any<T: Pod>(mask: LaneMask, value: T) -> LaneMask {
-    const {
-        assert!(
-            size_of::<T>() == 4 || size_of::<T>() == 8,
-            "match.sync only supports 4-byte and 8-byte types"
-        )
-    };
-    let ptr = &value as *const T;
-    LaneMask(unsafe {
-        if size_of::<T>() == 4 {
-            nv::match_any_sync_b32(ptr.cast::<u32>().read_unaligned(), mask.0)
-        } else {
-            nv::match_any_sync_b64(ptr.cast::<u64>().read_unaligned(), mask.0)
-        }
-    })
+    let mut lanes = LaneMask::FULL;
+    for_each_match_chunk(&value, |chunk| {
+        lanes &= LaneMask(unsafe {
+            match chunk {
+                MatchChunk::B32(x) => nv::match_any_sync_b32(x, mask.0),
+                MatchChunk::B64(x) => nv::match_any_sync_b64(x, mask.0),
+            }
+        });
+    });
+    lanes
 }
 
 /// Returns whether `value` is bitwise equal in all non-exited threads in `mask`
 /// (`match.all.sync`). The result is the same for all threads in `mask`.
 ///
-/// `T` must be 4 or 8 bytes in size; floating-point values are compared by bit pattern.
+/// `T` may be any non-zero-sized plain-data type; floating-point values are compared by bit
+/// pattern. Values are compared in 64-bit chunks with `match.all.sync.b64`, and the remaining bytes
+/// in 32-bit chunks with `match.all.sync.b32` (a final partial chunk is zero-extended); the result is true if all chunks
+/// are equal.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-match-sync>
 ///
@@ -602,20 +662,16 @@ pub unsafe fn match_any<T: Pod>(mask: LaneMask, value: T) -> LaneMask {
 /// execute the same match with the same `mask`.
 #[inline(always)]
 pub unsafe fn match_all<T: Pod>(mask: LaneMask, value: T) -> bool {
-    const {
-        assert!(
-            size_of::<T>() == 4 || size_of::<T>() == 8,
-            "match.sync only supports 4-byte and 8-byte types"
-        )
-    };
-    let ptr = &value as *const T;
-    unsafe {
-        if size_of::<T>() == 4 {
-            nv::match_all_sync_b32(ptr.cast::<u32>().read_unaligned(), mask.0).1
-        } else {
-            nv::match_all_sync_b64(ptr.cast::<u64>().read_unaligned(), mask.0).1
-        }
-    }
+    let mut equal = true;
+    for_each_match_chunk(&value, |chunk| {
+        equal &= unsafe {
+            match chunk {
+                MatchChunk::B32(x) => nv::match_all_sync_b32(x, mask.0).1,
+                MatchChunk::B64(x) => nv::match_all_sync_b64(x, mask.0).1,
+            }
+        };
+    });
+    equal
 }
 
 /// Reduction operation of `reduce` and `reduce_f32`.
@@ -645,12 +701,19 @@ pub enum Absolute {
 }
 
 mod sealed {
+    use core::simd::Simd;
+
     pub trait Sealed {}
     impl Sealed for u32 {}
     impl Sealed for i32 {}
+    impl Sealed for f32 {}
+    impl<const N: usize> Sealed for Simd<u32, N> {}
+    impl<const N: usize> Sealed for Simd<i32, N> {}
+    impl<const N: usize> Sealed for Simd<f32, N> {}
 }
 
-/// Integer types that can be reduced across a warp with [`reduce`]: `u32` and `i32`.
+/// Integer types that can be reduced across a warp with [`reduce`]: `u32`, `i32`, and `Simd`
+/// vectors of them, whose lanes are reduced independently (one `redux.sync` per lane).
 ///
 /// `Min` and `Max` compare according to the signedness of the type; `Add`, `And`, `Or` and `Xor`
 /// operate on the bit patterns.
@@ -697,8 +760,25 @@ impl ReduxInt for i32 {
     }
 }
 
+macro_rules! redux_simd {
+    ($($elem:ty),*) => {$(
+        impl<const N: usize> ReduxInt for Simd<$elem, N> {
+            #[inline(always)]
+            unsafe fn reduce<const OP: ReduxOp>(mask: LaneMask, value: Self) -> Self {
+                let value = value.to_array();
+                Simd::from_array(array_from_fn(|i| unsafe {
+                    <$elem as ReduxInt>::reduce::<OP>(mask, value[i])
+                }))
+            }
+        }
+    )*};
+}
+
+redux_simd!(u32, i32);
+
 /// Reduces `value` across the non-exited threads of `mask` with the operation `OP` and returns the
-/// result to all of them (`redux.sync`). Works on `u32` and `i32`; all [`ReduxOp`]s are
+/// result to all of them (`redux.sync`). Works on `u32` and `i32` and on `Simd` vectors of them,
+/// whose lanes are reduced independently with one `redux.sync` each; all [`ReduxOp`]s are
 /// supported. The result of [`ReduxOp::Add`] is truncated to 32 bits.
 ///
 /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-redux-sync>
@@ -712,8 +792,57 @@ pub unsafe fn reduce<const OP: ReduxOp, T: ReduxInt>(mask: LaneMask, value: T) -
     unsafe { T::reduce::<OP>(mask, value) }
 }
 
-/// Reduces the `f32` `value` across the non-exited threads of `mask` with the operation `OP` and
-/// returns the result to all of them (`redux.sync.{min,max}{.abs}{.NaN}.f32`).
+/// Floating-point types that can be reduced across a warp with [`reduce_f32`]: `f32` and
+/// `Simd<f32, N>`, whose lanes are reduced independently (one `redux.sync` per lane).
+#[cfg(target_feature = "sm_100f")]
+pub trait ReduxF32: Copy + sealed::Sealed {
+    #[doc(hidden)]
+    unsafe fn reduce<const OP: ReduxOp, const ABS: Absolute, const NAN: NanHandling>(
+        mask: LaneMask,
+        value: Self,
+    ) -> Self;
+}
+
+#[cfg(target_feature = "sm_100f")]
+impl ReduxF32 for f32 {
+    #[inline(always)]
+    unsafe fn reduce<const OP: ReduxOp, const ABS: Absolute, const NAN: NanHandling>(
+        mask: LaneMask,
+        value: f32,
+    ) -> f32 {
+        const {
+            assert!(
+                matches!(OP, ReduxOp::Min | ReduxOp::Max),
+                "floating-point reductions only support Min and Max"
+            )
+        };
+        const_map!(OP => O: nv::ReduxOp {
+            ReduxOp::Min => nv::ReduxOp::Min,
+            ReduxOp::Max => nv::ReduxOp::Max,
+        } in const_bool!(A = matches!(ABS, Absolute::Enabled) => const_bool!(
+            N = matches!(NAN, NanHandling::Propagate) =>
+            unsafe { nv::redux_sync_f32::<O, A, N>(value, mask.0) }
+        )))
+    }
+}
+
+#[cfg(target_feature = "sm_100f")]
+impl<const N: usize> ReduxF32 for Simd<f32, N> {
+    #[inline(always)]
+    unsafe fn reduce<const OP: ReduxOp, const ABS: Absolute, const NAN: NanHandling>(
+        mask: LaneMask,
+        value: Self,
+    ) -> Self {
+        let value = value.to_array();
+        Simd::from_array(array_from_fn(|i| unsafe {
+            f32::reduce::<OP, ABS, NAN>(mask, value[i])
+        }))
+    }
+}
+
+/// Reduces the `f32` `value` (or each lane of a `Simd<f32, N>` independently) across the
+/// non-exited threads of `mask` with the operation `OP` and returns the result to all of them
+/// (`redux.sync.{min,max}{.abs}{.NaN}.f32`, one per lane).
 ///
 /// `OP` must be [`ReduxOp::Min`] or [`ReduxOp::Max`]. If `ABS` is [`Absolute::Enabled`], the
 /// absolute values of the inputs are reduced. With [`NanHandling::Ignore`], NaN inputs are ignored
@@ -730,23 +859,16 @@ pub unsafe fn reduce<const OP: ReduxOp, T: ReduxInt>(mask: LaneMask, value: T) -
 /// execute the same reduction with the same `mask`.
 #[cfg(target_feature = "sm_100f")]
 #[inline(always)]
-pub unsafe fn reduce_f32<const OP: ReduxOp, const ABS: Absolute, const NAN: NanHandling>(
+pub unsafe fn reduce_f32<
+    const OP: ReduxOp,
+    const ABS: Absolute,
+    const NAN: NanHandling,
+    T: ReduxF32,
+>(
     mask: LaneMask,
-    value: f32,
-) -> f32 {
-    const {
-        assert!(
-            matches!(OP, ReduxOp::Min | ReduxOp::Max),
-            "floating-point reductions only support Min and Max"
-        )
-    };
-    const_map!(OP => O: nv::ReduxOp {
-        ReduxOp::Min => nv::ReduxOp::Min,
-        ReduxOp::Max => nv::ReduxOp::Max,
-    } in const_bool!(A = matches!(ABS, Absolute::Enabled) => const_bool!(
-        N = matches!(NAN, NanHandling::Propagate) =>
-        unsafe { nv::redux_sync_f32::<O, A, N>(value, mask.0) }
-    )))
+    value: T,
+) -> T {
+    unsafe { T::reduce::<OP, ABS, NAN>(mask, value) }
 }
 
 /// The result of `elect`.

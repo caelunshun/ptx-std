@@ -28,11 +28,17 @@
 //!
 //! # Packed and vector types
 //!
-//! Operations on the packed types [`f16x2`] and [`bf16x2`], and on arrays (the vector forms
-//! `.v2`, `.v4` and `.v8`), access adjacent scalar elements in memory. Atomicity is guaranteed
-//! separately for each scalar element; the operation as a whole is not guaranteed to be atomic as
-//! a single access. The vector forms require `sm_90` and global memory: `SPACE` must be
-//! [`AtomicSpace::Generic`] or [`AtomicSpace::Global`].
+//! Operations on the packed types [`f16x2`] and [`bf16x2`], and on the vector types [`f16x4`],
+//! [`f16x8`], [`bf16x4`], [`bf16x8`] and `Simd<f32, 2 | 4>` (the vector forms `.v2` and `.v4`),
+//! access adjacent scalar elements in memory. Atomicity is guaranteed separately for each scalar
+//! element; the operation as a whole is not guaranteed to be atomic as a single access. The
+//! vector forms require `sm_90` and global memory: `SPACE` must be [`AtomicSpace::Generic`] or
+//! [`AtomicSpace::Global`].
+//!
+//! The state space requirement depends on the operation, not just the type: [`f16x2`] and
+//! [`bf16x2`] are added with the packed `.f16x2`/`.bf16x2` forms, which support every state space,
+//! but their minimum and maximum use the vector forms `.v2.f16`/`.v2.bf16`, which require `sm_90`
+//! and global memory.
 //!
 //! # L2 cache hints
 //!
@@ -46,8 +52,8 @@
 //!
 //! The `atom_*` and `red_*` functions require that:
 //!
-//! - `ptr` is valid for reads and writes of `T` and aligned to `size_of::<T>()` (which exceeds the
-//!   alignment of `T` for arrays).
+//! - `ptr` is valid for reads and writes of `T` and aligned for `T`. The alignment of every type
+//!   supporting atomic operations is equal to its size, as required by the vector forms.
 //! - `ptr` points into the state space selected by `SPACE`: global memory for
 //!   [`AtomicSpace::Global`], the shared memory of the executing CTA for
 //!   [`AtomicSpace::SharedCta`], the shared memory of any CTA of the executing cluster for
@@ -57,6 +63,8 @@
 //!
 //! <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-atom>
 
+#[cfg(target_feature = "sm_90")]
+use core::simd::Simd;
 use core::{arch::asm, marker::ConstParamTy};
 
 #[cfg(target_feature = "sm_90")]
@@ -68,6 +76,8 @@ use crate::{
     memory::CachePolicy,
     modifiers::{MemoryOrdering, Scope},
 };
+#[cfg(target_feature = "sm_90")]
+use crate::{bf16x4, bf16x8, f16x4, f16x8};
 use sealed::Op;
 
 /// The state space that the address of an atomic operation points into.
@@ -199,21 +209,22 @@ mod sealed {
 
 /// Types supporting [`atom_add`] and [`red_add`].
 ///
-/// This trait is sealed. It is implemented for `u32`, `i32`, `u64`, `i64`, `f32`, `f64`, [`f16`](struct@f16)
-/// and [`f16x2`], and with `sm_90` also for [`bf16`], [`bf16x2`] and the vector types
-/// `[f16; 2 | 4 | 8]`, `[bf16; 2 | 4 | 8]`, `[f16x2; 2 | 4]`, `[bf16x2; 2 | 4]` and
-/// `[f32; 2 | 4]`.
+/// This trait is sealed. It is implemented for `u32`, `i32`, `u64`, `i64`, `f32`, `f64`,
+/// [`f16`](struct@f16) and [`f16x2`], and with `sm_90` also for [`bf16`], [`bf16x2`], the vector
+/// types [`f16x4`], [`f16x8`], [`bf16x4`] and [`bf16x8`], and `Simd<f32, 2>` and `Simd<f32, 4>`.
 ///
 /// `i64` is added with the `.u64` form, as PTX has no `.add.s64`; the result is identical in two's
 /// complement. Floating-point addition on `f64` requires `sm_60`, on `f16x2` `sm_60` and on
-/// `f16` `sm_70`.
+/// `f16` `sm_70`. The vector types (all except [`f16x2`] and [`bf16x2`]) only support global
+/// memory.
 pub trait AtomicAdd: sealed::Rmw {}
 
 /// Types supporting [`atom_min`], [`atom_max`], [`red_min`] and [`red_max`].
 ///
 /// This trait is sealed. It is implemented for `u32`, `i32`, `u64` and `i64`, and with `sm_90`
-/// also for the vector types `[f16; 2 | 4 | 8]`, `[bf16; 2 | 4 | 8]`, `[f16x2; 2 | 4]` and
-/// `[bf16x2; 2 | 4]`.
+/// also for [`f16x2`], [`bf16x2`], [`f16x4`], [`f16x8`], [`bf16x4`] and [`bf16x8`]. These
+/// floating-point types only support global memory, including [`f16x2`] and [`bf16x2`] (which
+/// can be added in any state space).
 pub trait AtomicMinMax: sealed::Rmw {}
 
 /// Types supporting the bitwise operations [`atom_and`], [`atom_or`], [`atom_xor`],
@@ -321,7 +332,6 @@ const fn assert_qualifiers_supported(
     );
 }
 
-#[cfg(target_feature = "sm_90")]
 const fn assert_global_space(space: AtomicSpace) {
     assert!(
         matches!(space, AtomicSpace::Generic | AtomicSpace::Global),
@@ -500,26 +510,31 @@ macro_rules! emit_rmw {
 
 /// Implements [`sealed::Rmw`] and the given marker traits.
 ///
-/// Each entry gives the register class, the positional operand indices of the destination and
-/// source registers, the supported state spaces (`all` or `global`), conversions to and from an
-/// array of registers, and the qualifiers (operation and type) of each supported operation.
+/// Each entry gives the marker traits implemented for the type (each with optional `cfg`
+/// attributes), followed by groups of operations sharing a register layout. A group gives the
+/// register class, the positional operand indices of the destination and source registers, the
+/// state spaces supported by its operations (`all` or `global`), conversions to and from an array
+/// of registers, and the qualifiers (operation and type) of each operation of the group. The
+/// layout and the supported state spaces can thus differ between the operations of a type.
 macro_rules! impl_rmw {
-    (@markers $attrs:tt $ty:ty; $($marker:ident),+) => {
-        $(impl_rmw!(@marker $attrs $ty, $marker);)+
+    (@markers $attrs:tt $ty:ty; $($(#[$mattr:meta])* $marker:ident),+) => {
+        $(impl_rmw!(@marker $attrs $ty, $(#[$mattr])* $marker);)+
     };
-    (@marker [$(#[$attr:meta])*] $ty:ty, $marker:ident) => {
+    (@marker [$(#[$attr:meta])*] $ty:ty, $(#[$mattr:meta])* $marker:ident) => {
         $(#[$attr])*
+        $(#[$mattr])*
         impl $marker for $ty {}
     };
     (@check all) => {};
     (@check global) => {
-        const { assert_global_space(SPACE) }
+        assert_global_space(SPACE);
     };
     ($(
         $(#[$attr:meta])*
-        $ty:ty => $cls:ident $regs:tt, $spaces:ident, |$v:ident| $to:expr, |$r:ident| $from:expr;
-            { $($op:ident => $op_lit:literal $ty_lit:literal),+ $(,)? }
-            impl $($marker:ident),+;
+        $ty:ty: $($(#[$mattr:meta])* $marker:ident),+ {$(
+            $cls:ident $regs:tt, $spaces:ident, |$v:ident| $to:expr, |$r:ident| $from:expr;
+                { $($op:ident => $op_lit:literal $ty_lit:literal),+ $(,)? }
+        )+}
     )+) => {$(
         $(#[$attr])*
         impl sealed::Rmw for $ty {
@@ -529,18 +544,19 @@ macro_rules! impl_rmw {
                 const SEM: MemoryOrdering,
                 const SCOPE: Scope,
                 const SPACE: AtomicSpace,
-            >(ptr: *mut Self, $v: Self) -> Self {
-                impl_rmw!(@check $spaces);
+            >(ptr: *mut Self, value: Self) -> Self {
+                const { $($(if matches!(OP, Op::$op) { impl_rmw!(@check $spaces); })+)+ };
                 let a = space_address::<SPACE, _>(ptr);
-                let b = $to;
-                let mut d = b;
-                $(if const { matches!(OP, Op::$op) } {
-                    with_qualifiers!(atom $spaces, emit_rmw!(atom $cls $regs $op_lit $ty_lit a d b))
-                } else)+ {
+                $($(if const { matches!(OP, Op::$op) } {
+                    let $v = value;
+                    let b = $to;
+                    let mut d = b;
+                    with_qualifiers!(atom $spaces, emit_rmw!(atom $cls $regs $op_lit $ty_lit a d b));
+                    let $r = d;
+                    $from
+                } else)+)+ {
                     unreachable!()
                 }
-                let $r = d;
-                $from
             }
 
             #[inline(always)]
@@ -549,20 +565,21 @@ macro_rules! impl_rmw {
                 const SEM: MemoryOrdering,
                 const SCOPE: Scope,
                 const SPACE: AtomicSpace,
-            >(ptr: *mut Self, $v: Self, policy: u64) -> Self {
+            >(ptr: *mut Self, value: Self, policy: u64) -> Self {
                 let a = space_address::<SPACE, _>(ptr);
-                let b = $to;
-                let mut d = b;
-                $(if const { matches!(OP, Op::$op) } {
+                $($(if const { matches!(OP, Op::$op) } {
+                    let $v = value;
+                    let b = $to;
+                    let mut d = b;
                     with_qualifiers!(
                         atom global,
                         emit_rmw!(atom_hint $cls $regs $op_lit $ty_lit a d b policy)
-                    )
-                } else)+ {
+                    );
+                    let $r = d;
+                    $from
+                } else)+)+ {
                     unreachable!()
                 }
-                let $r = d;
-                $from
             }
 
             #[inline(always)]
@@ -571,13 +588,14 @@ macro_rules! impl_rmw {
                 const SEM: MemoryOrdering,
                 const SCOPE: Scope,
                 const SPACE: AtomicSpace,
-            >(ptr: *mut Self, $v: Self) {
-                impl_rmw!(@check $spaces);
+            >(ptr: *mut Self, value: Self) {
+                const { $($(if matches!(OP, Op::$op) { impl_rmw!(@check $spaces); })+)+ };
                 let a = space_address::<SPACE, _>(ptr);
-                let b = $to;
-                $(if const { matches!(OP, Op::$op) } {
+                $($(if const { matches!(OP, Op::$op) } {
+                    let $v = value;
+                    let b = $to;
                     with_qualifiers!(red $spaces, emit_rmw!(red $cls $regs $op_lit $ty_lit a b))
-                } else)+ {
+                } else)+)+ {
                     unreachable!()
                 }
             }
@@ -588,188 +606,172 @@ macro_rules! impl_rmw {
                 const SEM: MemoryOrdering,
                 const SCOPE: Scope,
                 const SPACE: AtomicSpace,
-            >(ptr: *mut Self, $v: Self, policy: u64) {
+            >(ptr: *mut Self, value: Self, policy: u64) {
                 let a = space_address::<SPACE, _>(ptr);
-                let b = $to;
-                $(if const { matches!(OP, Op::$op) } {
+                $($(if const { matches!(OP, Op::$op) } {
+                    let $v = value;
+                    let b = $to;
                     with_qualifiers!(
                         red global,
                         emit_rmw!(red_hint $cls $regs $op_lit $ty_lit a b policy)
                     )
-                } else)+ {
+                } else)+)+ {
                     unreachable!()
                 }
             }
         }
 
-        impl_rmw!(@markers [$(#[$attr])*] $ty; $($marker),+);
+        impl_rmw!(@markers [$(#[$attr])*] $ty; $($(#[$mattr])* $marker),+);
     )+};
 }
 
 impl_rmw! {
-    u32 => reg32 ([0] [1]), all, |v| [v], |r| r[0];
-        {
-            Add => ".add" ".u32",
-            Min => ".min" ".u32",
-            Max => ".max" ".u32",
-            And => ".and" ".b32",
-            Or => ".or" ".b32",
-            Xor => ".xor" ".b32",
-            Inc => ".inc" ".u32",
-            Dec => ".dec" ".u32",
-        }
-        impl AtomicAdd, AtomicMinMax, AtomicBitwise;
-    i32 => reg32 ([0] [1]), all, |v| [v as u32], |r| r[0] as i32;
-        {
-            Add => ".add" ".s32",
-            Min => ".min" ".s32",
-            Max => ".max" ".s32",
-            And => ".and" ".b32",
-            Or => ".or" ".b32",
-            Xor => ".xor" ".b32",
-        }
-        impl AtomicAdd, AtomicMinMax, AtomicBitwise;
-    u64 => reg64 ([0] [1]), all, |v| [v], |r| r[0];
-        {
-            Add => ".add" ".u64",
-            Min => ".min" ".u64",
-            Max => ".max" ".u64",
-            And => ".and" ".b64",
-            Or => ".or" ".b64",
-            Xor => ".xor" ".b64",
-        }
-        impl AtomicAdd, AtomicMinMax, AtomicBitwise;
+    u32: AtomicAdd, AtomicMinMax, AtomicBitwise {
+        reg32 ([0] [1]), all, |v| [v], |r| r[0];
+            {
+                Add => ".add" ".u32",
+                Min => ".min" ".u32",
+                Max => ".max" ".u32",
+                And => ".and" ".b32",
+                Or => ".or" ".b32",
+                Xor => ".xor" ".b32",
+                Inc => ".inc" ".u32",
+                Dec => ".dec" ".u32",
+            }
+    }
+    i32: AtomicAdd, AtomicMinMax, AtomicBitwise {
+        reg32 ([0] [1]), all, |v| [v as u32], |r| r[0] as i32;
+            {
+                Add => ".add" ".s32",
+                Min => ".min" ".s32",
+                Max => ".max" ".s32",
+                And => ".and" ".b32",
+                Or => ".or" ".b32",
+                Xor => ".xor" ".b32",
+            }
+    }
+    u64: AtomicAdd, AtomicMinMax, AtomicBitwise {
+        reg64 ([0] [1]), all, |v| [v], |r| r[0];
+            {
+                Add => ".add" ".u64",
+                Min => ".min" ".u64",
+                Max => ".max" ".u64",
+                And => ".and" ".b64",
+                Or => ".or" ".b64",
+                Xor => ".xor" ".b64",
+            }
+    }
     // There is no `.add.s64`; two's complement addition is the same operation as `.add.u64`.
-    i64 => reg64 ([0] [1]), all, |v| [v as u64], |r| r[0] as i64;
-        {
-            Add => ".add" ".u64",
-            Min => ".min" ".s64",
-            Max => ".max" ".s64",
-            And => ".and" ".b64",
-            Or => ".or" ".b64",
-            Xor => ".xor" ".b64",
-        }
-        impl AtomicAdd, AtomicMinMax, AtomicBitwise;
-    f32 => reg32 ([0] [1]), all, |v| [v.to_bits()], |r| f32::from_bits(r[0]);
-        { Add => ".add" ".f32" }
-        impl AtomicAdd;
-    f64 => reg64 ([0] [1]), all, |v| [v.to_bits()], |r| f64::from_bits(r[0]);
-        { Add => ".add" ".f64" }
-        impl AtomicAdd;
-    f16 => reg16 ([0] [1]), all, |v| [v.to_bits()], |r| f16::from_bits(r[0]);
-        { Add => ".add.noftz" ".f16" }
-        impl AtomicAdd;
-    f16x2 => reg32 ([0] [1]), all, |v| [v.to_bits()], |r| f16x2::from_bits(r[0]);
-        { Add => ".add.noftz" ".f16x2" }
-        impl AtomicAdd;
+    i64: AtomicAdd, AtomicMinMax, AtomicBitwise {
+        reg64 ([0] [1]), all, |v| [v as u64], |r| r[0] as i64;
+            {
+                Add => ".add" ".u64",
+                Min => ".min" ".s64",
+                Max => ".max" ".s64",
+                And => ".and" ".b64",
+                Or => ".or" ".b64",
+                Xor => ".xor" ".b64",
+            }
+    }
+    f32: AtomicAdd {
+        reg32 ([0] [1]), all, |v| [v.to_bits()], |r| f32::from_bits(r[0]);
+            { Add => ".add" ".f32" }
+    }
+    f64: AtomicAdd {
+        reg64 ([0] [1]), all, |v| [v.to_bits()], |r| f64::from_bits(r[0]);
+            { Add => ".add" ".f64" }
+    }
+    f16: AtomicAdd {
+        reg16 ([0] [1]), all, |v| [v.to_bits()], |r| f16::from_bits(r[0]);
+            { Add => ".add.noftz" ".f16" }
+    }
+    // The packed forms add in all state spaces, but only the `.v2.f16` form has min and max.
+    f16x2: AtomicAdd, #[cfg(target_feature = "sm_90")] AtomicMinMax {
+        reg32 ([0] [1]), all, |v| [v.to_bits()], |r| f16x2::from_bits(r[0]);
+            { Add => ".add.noftz" ".f16x2" }
+        reg16 ([0 1] [2 3]), global,
+            |v| {
+                let bits = v.to_bits();
+                [bits as u16, (bits >> 16) as u16]
+            },
+            |r| f16x2::from_bits(r[0] as u32 | (r[1] as u32) << 16);
+            {
+                Min => ".min.noftz" ".v2.f16",
+                Max => ".max.noftz" ".v2.f16",
+            }
+    }
     #[cfg(target_feature = "sm_90")]
-    bf16 => reg16 ([0] [1]), all, |v| [v.to_bits()], |r| bf16::from_bits(r[0]);
-        { Add => ".add.noftz" ".bf16" }
-        impl AtomicAdd;
+    bf16: AtomicAdd {
+        reg16 ([0] [1]), all, |v| [v.to_bits()], |r| bf16::from_bits(r[0]);
+            { Add => ".add.noftz" ".bf16" }
+    }
     #[cfg(target_feature = "sm_90")]
-    bf16x2 => reg32 ([0] [1]), all, |v| [v.to_bits()], |r| bf16x2::from_bits(r[0]);
-        { Add => ".add.noftz" ".bf16x2" }
-        impl AtomicAdd;
+    bf16x2: AtomicAdd, AtomicMinMax {
+        reg32 ([0] [1]), all, |v| [v.to_bits()], |r| bf16x2::from_bits(r[0]);
+            { Add => ".add.noftz" ".bf16x2" }
+        reg16 ([0 1] [2 3]), global,
+            |v| {
+                let bits = v.to_bits();
+                [bits as u16, (bits >> 16) as u16]
+            },
+            |r| bf16x2::from_bits(r[0] as u32 | (r[1] as u32) << 16);
+            {
+                Min => ".min.noftz" ".v2.bf16",
+                Max => ".max.noftz" ".v2.bf16",
+            }
+    }
     #[cfg(target_feature = "sm_90")]
-    [f16; 2] => reg16 ([0 1] [2 3]), global,
-        |v| v.map(f16::to_bits), |r| r.map(f16::from_bits);
-        {
-            Add => ".add.noftz" ".v2.f16",
-            Min => ".min.noftz" ".v2.f16",
-            Max => ".max.noftz" ".v2.f16",
-        }
-        impl AtomicAdd, AtomicMinMax;
+    f16x4: AtomicAdd, AtomicMinMax {
+        reg32 ([0 1] [2 3]), global,
+            |v| v.to_x2s().map(f16x2::to_bits), |r| f16x4::from_x2s(r.map(f16x2::from_bits));
+            {
+                Add => ".add.noftz" ".v2.f16x2",
+                Min => ".min.noftz" ".v2.f16x2",
+                Max => ".max.noftz" ".v2.f16x2",
+            }
+    }
     #[cfg(target_feature = "sm_90")]
-    [f16; 4] => reg16 ([0 1 2 3] [4 5 6 7]), global,
-        |v| v.map(f16::to_bits), |r| r.map(f16::from_bits);
-        {
-            Add => ".add.noftz" ".v4.f16",
-            Min => ".min.noftz" ".v4.f16",
-            Max => ".max.noftz" ".v4.f16",
-        }
-        impl AtomicAdd, AtomicMinMax;
+    f16x8: AtomicAdd, AtomicMinMax {
+        reg32 ([0 1 2 3] [4 5 6 7]), global,
+            |v| v.to_x2s().map(f16x2::to_bits), |r| f16x8::from_x2s(r.map(f16x2::from_bits));
+            {
+                Add => ".add.noftz" ".v4.f16x2",
+                Min => ".min.noftz" ".v4.f16x2",
+                Max => ".max.noftz" ".v4.f16x2",
+            }
+    }
     #[cfg(target_feature = "sm_90")]
-    [f16; 8] => reg16 ([0 1 2 3 4 5 6 7] [8 9 10 11 12 13 14 15]), global,
-        |v| v.map(f16::to_bits), |r| r.map(f16::from_bits);
-        {
-            Add => ".add.noftz" ".v8.f16",
-            Min => ".min.noftz" ".v8.f16",
-            Max => ".max.noftz" ".v8.f16",
-        }
-        impl AtomicAdd, AtomicMinMax;
+    bf16x4: AtomicAdd, AtomicMinMax {
+        reg32 ([0 1] [2 3]), global,
+            |v| v.to_x2s().map(bf16x2::to_bits), |r| bf16x4::from_x2s(r.map(bf16x2::from_bits));
+            {
+                Add => ".add.noftz" ".v2.bf16x2",
+                Min => ".min.noftz" ".v2.bf16x2",
+                Max => ".max.noftz" ".v2.bf16x2",
+            }
+    }
     #[cfg(target_feature = "sm_90")]
-    [bf16; 2] => reg16 ([0 1] [2 3]), global,
-        |v| v.map(bf16::to_bits), |r| r.map(bf16::from_bits);
-        {
-            Add => ".add.noftz" ".v2.bf16",
-            Min => ".min.noftz" ".v2.bf16",
-            Max => ".max.noftz" ".v2.bf16",
-        }
-        impl AtomicAdd, AtomicMinMax;
+    bf16x8: AtomicAdd, AtomicMinMax {
+        reg32 ([0 1 2 3] [4 5 6 7]), global,
+            |v| v.to_x2s().map(bf16x2::to_bits), |r| bf16x8::from_x2s(r.map(bf16x2::from_bits));
+            {
+                Add => ".add.noftz" ".v4.bf16x2",
+                Min => ".min.noftz" ".v4.bf16x2",
+                Max => ".max.noftz" ".v4.bf16x2",
+            }
+    }
     #[cfg(target_feature = "sm_90")]
-    [bf16; 4] => reg16 ([0 1 2 3] [4 5 6 7]), global,
-        |v| v.map(bf16::to_bits), |r| r.map(bf16::from_bits);
-        {
-            Add => ".add.noftz" ".v4.bf16",
-            Min => ".min.noftz" ".v4.bf16",
-            Max => ".max.noftz" ".v4.bf16",
-        }
-        impl AtomicAdd, AtomicMinMax;
+    Simd<f32, 2>: AtomicAdd {
+        reg32 ([0 1] [2 3]), global,
+            |v| v.to_array().map(f32::to_bits), |r| Simd::from_array(r.map(f32::from_bits));
+            { Add => ".add" ".v2.f32" }
+    }
     #[cfg(target_feature = "sm_90")]
-    [bf16; 8] => reg16 ([0 1 2 3 4 5 6 7] [8 9 10 11 12 13 14 15]), global,
-        |v| v.map(bf16::to_bits), |r| r.map(bf16::from_bits);
-        {
-            Add => ".add.noftz" ".v8.bf16",
-            Min => ".min.noftz" ".v8.bf16",
-            Max => ".max.noftz" ".v8.bf16",
-        }
-        impl AtomicAdd, AtomicMinMax;
-    #[cfg(target_feature = "sm_90")]
-    [f16x2; 2] => reg32 ([0 1] [2 3]), global,
-        |v| v.map(f16x2::to_bits), |r| r.map(f16x2::from_bits);
-        {
-            Add => ".add.noftz" ".v2.f16x2",
-            Min => ".min.noftz" ".v2.f16x2",
-            Max => ".max.noftz" ".v2.f16x2",
-        }
-        impl AtomicAdd, AtomicMinMax;
-    #[cfg(target_feature = "sm_90")]
-    [f16x2; 4] => reg32 ([0 1 2 3] [4 5 6 7]), global,
-        |v| v.map(f16x2::to_bits), |r| r.map(f16x2::from_bits);
-        {
-            Add => ".add.noftz" ".v4.f16x2",
-            Min => ".min.noftz" ".v4.f16x2",
-            Max => ".max.noftz" ".v4.f16x2",
-        }
-        impl AtomicAdd, AtomicMinMax;
-    #[cfg(target_feature = "sm_90")]
-    [bf16x2; 2] => reg32 ([0 1] [2 3]), global,
-        |v| v.map(bf16x2::to_bits), |r| r.map(bf16x2::from_bits);
-        {
-            Add => ".add.noftz" ".v2.bf16x2",
-            Min => ".min.noftz" ".v2.bf16x2",
-            Max => ".max.noftz" ".v2.bf16x2",
-        }
-        impl AtomicAdd, AtomicMinMax;
-    #[cfg(target_feature = "sm_90")]
-    [bf16x2; 4] => reg32 ([0 1 2 3] [4 5 6 7]), global,
-        |v| v.map(bf16x2::to_bits), |r| r.map(bf16x2::from_bits);
-        {
-            Add => ".add.noftz" ".v4.bf16x2",
-            Min => ".min.noftz" ".v4.bf16x2",
-            Max => ".max.noftz" ".v4.bf16x2",
-        }
-        impl AtomicAdd, AtomicMinMax;
-    #[cfg(target_feature = "sm_90")]
-    [f32; 2] => reg32 ([0 1] [2 3]), global,
-        |v| v.map(f32::to_bits), |r| r.map(f32::from_bits);
-        { Add => ".add" ".v2.f32" }
-        impl AtomicAdd;
-    #[cfg(target_feature = "sm_90")]
-    [f32; 4] => reg32 ([0 1 2 3] [4 5 6 7]), global,
-        |v| v.map(f32::to_bits), |r| r.map(f32::from_bits);
-        { Add => ".add" ".v4.f32" }
-        impl AtomicAdd;
+    Simd<f32, 4>: AtomicAdd {
+        reg32 ([0 1 2 3] [4 5 6 7]), global,
+            |v| v.to_array().map(f32::to_bits), |r| Simd::from_array(r.map(f32::from_bits));
+            { Add => ".add" ".v4.f32" }
+    }
 }
 
 /// Emits `atom.exch` (`$kind` = `exch` or `exch_hint`) or `atom.cas` (`$kind` = `cas`), for a
@@ -1147,8 +1149,8 @@ rmw_fns! {
     /// Atomically adds `value` to `*ptr` (`.add`).
     ///
     /// Integer addition wraps around on overflow. Floating-point addition rounds to nearest
-    /// even. `f32` addition (including the `[f32; N]` vector forms) flushes subnormal inputs and
-    /// results to sign-preserving zero in global memory, but preserves them in shared memory.
+    /// even. `f32` addition (including `Simd<f32, 2 | 4>`) flushes subnormal inputs and results to
+    /// sign-preserving zero in global memory, but preserves them in shared memory.
     /// Addition of all other floating-point types preserves subnormals (`.noftz`).
     [T: AtomicAdd,] T, Add,
     atom_add, atom_add_with_cache_hint, red_add, red_add_with_cache_hint
@@ -1157,9 +1159,9 @@ rmw_fns! {
 rmw_fns! {
     /// Atomically replaces `*ptr` with the minimum of `*ptr` and `value` (`.min`).
     ///
-    /// Integers are compared as signed or unsigned depending on `T`. The floating-point vector
-    /// forms have the same semantics as the non-atomic `min` instruction and preserve
-    /// subnormals (`.noftz`).
+    /// Integers are compared as signed or unsigned depending on `T`. The floating-point types
+    /// have the same semantics as the non-atomic `min` instruction and preserve subnormals
+    /// (`.noftz`). They require `sm_90` and global memory.
     [T: AtomicMinMax,] T, Min,
     atom_min, atom_min_with_cache_hint, red_min, red_min_with_cache_hint
 }
@@ -1167,9 +1169,9 @@ rmw_fns! {
 rmw_fns! {
     /// Atomically replaces `*ptr` with the maximum of `*ptr` and `value` (`.max`).
     ///
-    /// Integers are compared as signed or unsigned depending on `T`. The floating-point vector
-    /// forms have the same semantics as the non-atomic `max` instruction and preserve
-    /// subnormals (`.noftz`).
+    /// Integers are compared as signed or unsigned depending on `T`. The floating-point types
+    /// have the same semantics as the non-atomic `max` instruction and preserve subnormals
+    /// (`.noftz`). They require `sm_90` and global memory.
     [T: AtomicMinMax,] T, Max,
     atom_max, atom_max_with_cache_hint, red_max, red_max_with_cache_hint
 }

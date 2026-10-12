@@ -1,24 +1,27 @@
 // --- LLM-generated --- //
-use core::arch::nvptx as nv;
+use core::{
+    arch::{asm, nvptx as nv},
+    simd::{Simd, SimdElement},
+};
 
 use crate::{Denormals, NanHandling, Overflow, Relu, Rounding, Saturation, XorSignAbs};
+
+/// Rejects the rounding modes that are not IEEE 754 rounding modes at compile time.
+pub(crate) const fn assert_ieee_rounding(rnd: Rounding) {
+    assert!(
+        matches!(
+            rnd,
+            Rounding::NearestEven | Rounding::TowardZero | Rounding::Down | Rounding::Up
+        ),
+        "unsupported rounding mode: expected NearestEven, TowardZero, Down or Up"
+    );
+}
 
 /// Expands `$body` with a local `const $name: nv::Rounding` equal to the IEEE rounding mode
 /// `$rnd`, rejecting other modes at compile time.
 macro_rules! with_rounding {
     ($rnd:ident => $name:ident in $body:expr) => {{
-        const {
-            assert!(
-                matches!(
-                    $rnd,
-                    $crate::Rounding::NearestEven
-                        | $crate::Rounding::TowardZero
-                        | $crate::Rounding::Down
-                        | $crate::Rounding::Up
-                ),
-                "unsupported rounding mode: expected NearestEven, TowardZero, Down or Up"
-            )
-        };
+        const { $crate::data_types::f32_ext::assert_ieee_rounding($rnd) };
         const_map!($rnd => $name: core::arch::nvptx::Rounding {
             $crate::Rounding::NearestEven => core::arch::nvptx::Rounding::Rn,
             $crate::Rounding::TowardZero => core::arch::nvptx::Rounding::Rz,
@@ -81,6 +84,12 @@ pub(crate) use {with_ftz, with_rounding};
 
 /// Extensions for using PTX intrinsics operating on f32 values.
 ///
+/// The trait is implemented for [`f32`] and for [`Simd<f32, N>`](core::simd::Simd) of any width.
+/// Methods take and return `Self`, so on a `Simd` they operate lane-wise; the integer conversions
+/// return the associated integer types, which are the scalars for `f32` and `Simd`s of the same
+/// width for `Simd<f32, N>`. The documentation of these methods describes a single lane. The
+/// horizontal reductions (`reduce_*`) combine all lanes into one `f32`.
+///
 /// Methods taking a [`Rounding`] accept [`Rounding::NearestEven`], [`Rounding::TowardZero`],
 /// [`Rounding::Down`] and [`Rounding::Up`]; other modes are rejected at compile time. Methods
 /// taking [`Denormals`] either preserve subnormal values or flush subnormal inputs and results
@@ -94,8 +103,36 @@ pub(crate) use {with_ftz, with_rounding};
 /// The `.approx` instructions (methods with the `_approx` suffix) trade accuracy for speed. Where
 /// the PTX ISA specifies an error bound, it is given in the method's documentation; some bounds
 /// only hold over a restricted input range.
+///
+/// # `Simd<f32, N>` on Blackwell
+///
+/// With `sm_100` or later, [`add_with`](F32Ext::add_with), [`mul_with`](F32Ext::mul_with) and
+/// [`fma`](F32Ext::fma) on `Simd<f32, N>` process pairs of lanes with the packed `add`, `mul` and
+/// `fma` `.f32x2` instructions, and handle the last lane of an odd-width vector with the scalar
+/// instruction. The packed instructions have no saturation modifier, so
+/// [`Saturation::ClampToUnit`] uses the scalar instructions on every lane.
+/// [`reduce_sum`](F32Ext::reduce_sum) adds pairs of lanes with `add.rn.f32x2`, and
+/// [`reduce_min_with`](F32Ext::reduce_min_with) and [`reduce_max_with`](F32Ext::reduce_max_with)
+/// use the three-input `min.f32` and `max.f32`. All other methods (and all methods on earlier
+/// architectures) apply the scalar instruction to each lane.
+///
+/// Note that LLVM can also lower the plain `+`, `-` and `*` operators of `Simd<f32, N>` to `f32x2`
+/// instructions on `sm_100` and later (with round-to-nearest-even and subnormals preserved); use the
+/// methods of this trait to select an explicit rounding mode or flush-to-zero.
 pub trait F32Ext: Sized {
-    /// Adds two `f32` values.
+    /// The signed 32-bit integer type with the same shape as `Self`: `i32` for `f32`.
+    type I32;
+
+    /// The unsigned 32-bit integer type with the same shape as `Self`: `u32` for `f32`.
+    type U32;
+
+    /// The signed 64-bit integer type with the same shape as `Self`: `i64` for `f32`.
+    type I64;
+
+    /// The unsigned 64-bit integer type with the same shape as `Self`: `u64` for `f32`.
+    type U64;
+
+    /// Adds two values.
     ///
     /// `RND` selects the rounding mode, `DEN` the subnormal handling, and `SAT` optionally clamps
     /// the result to `[0.0, 1.0]` (NaN results become `+0.0`).
@@ -103,15 +140,15 @@ pub trait F32Ext: Sized {
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add>
     fn add_with<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
         self,
-        rhs: f32,
-    ) -> f32;
+        rhs: Self,
+    ) -> Self;
 
-    /// Multiplies two `f32` values.
+    /// Multiplies two values.
     ///
     /// `RND` selects the rounding mode and `DEN` the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-mul>
-    fn mul_with<const RND: Rounding, const DEN: Denormals>(self, rhs: f32) -> f32;
+    fn mul_with<const RND: Rounding, const DEN: Denormals>(self, rhs: Self) -> Self;
 
     /// Computes `self * b + c` with a single rounding.
     ///
@@ -122,16 +159,16 @@ pub trait F32Ext: Sized {
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-fma>
     fn fma<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
         self,
-        b: f32,
-        c: f32,
-    ) -> f32;
+        b: Self,
+        c: Self,
+    ) -> Self;
 
     /// Divides `self` by `rhs`, with the IEEE 754 compliant `div.rnd` instruction.
     ///
     /// `RND` selects the rounding mode and `DEN` the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-div>
-    fn div_with<const RND: Rounding, const DEN: Denormals>(self, rhs: f32) -> f32;
+    fn div_with<const RND: Rounding, const DEN: Denormals>(self, rhs: Self) -> Self;
 
     /// Divides `self` by `rhs` using the approximate `div.approx` instruction, computed as
     /// `self * (1 / rhs)`.
@@ -141,7 +178,7 @@ pub trait F32Ext: Sized {
     /// otherwise. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-div>
-    fn div_approx<const DEN: Denormals>(self, rhs: f32) -> f32;
+    fn div_approx<const DEN: Denormals>(self, rhs: Self) -> Self;
 
     /// Divides `self` by `rhs` using the `div.full` instruction, which is faster than IEEE 754
     /// division but less accurate (and not IEEE 754 compliant).
@@ -150,14 +187,14 @@ pub trait F32Ext: Sized {
     /// handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-div>
-    fn div_full_approx<const DEN: Denormals>(self, rhs: f32) -> f32;
+    fn div_full_approx<const DEN: Denormals>(self, rhs: Self) -> Self;
 
     /// Takes the reciprocal, with the IEEE 754 compliant `rcp.rnd` instruction.
     ///
     /// `RND` selects the rounding mode and `DEN` the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-rcp>
-    fn rcp_with<const RND: Rounding, const DEN: Denormals>(self) -> f32;
+    fn rcp_with<const RND: Rounding, const DEN: Denormals>(self) -> Self;
 
     /// Takes a fast, approximate reciprocal.
     ///
@@ -166,14 +203,14 @@ pub trait F32Ext: Sized {
     /// `±0.0` and NaN to NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-rcp>
-    fn rcp_approx_ftz(self) -> f32;
+    fn rcp_approx_ftz(self) -> Self;
 
     /// Takes the square root, with the IEEE 754 compliant `sqrt.rnd` instruction.
     ///
     /// `RND` selects the rounding mode and `DEN` the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-sqrt>
-    fn sqrt_with<const RND: Rounding, const DEN: Denormals>(self) -> f32;
+    fn sqrt_with<const RND: Rounding, const DEN: Denormals>(self) -> Self;
 
     /// Takes a fast, approximate square root (`sqrt.approx`).
     ///
@@ -182,7 +219,7 @@ pub trait F32Ext: Sized {
     /// `±0.0`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-sqrt>
-    fn sqrt_approx<const DEN: Denormals>(self) -> f32;
+    fn sqrt_approx<const DEN: Denormals>(self) -> Self;
 
     /// Takes a fast, approximate reciprocal square root (`rsqrt.approx`).
     ///
@@ -191,7 +228,7 @@ pub trait F32Ext: Sized {
     /// gives `+0.0`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-rsqrt>
-    fn rsqrt_approx<const DEN: Denormals>(self) -> f32;
+    fn rsqrt_approx<const DEN: Denormals>(self) -> Self;
 
     /// Computes the sine of `self` (in radians), approximately (`sin.approx`).
     ///
@@ -200,7 +237,7 @@ pub trait F32Ext: Sized {
     /// `±inf` gives NaN. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-sin>
-    fn sin_approx<const DEN: Denormals>(self) -> f32;
+    fn sin_approx<const DEN: Denormals>(self) -> Self;
 
     /// Computes the cosine of `self` (in radians), approximately (`cos.approx`).
     ///
@@ -209,7 +246,7 @@ pub trait F32Ext: Sized {
     /// `±inf` gives NaN. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-cos>
-    fn cos_approx<const DEN: Denormals>(self) -> f32;
+    fn cos_approx<const DEN: Denormals>(self) -> Self;
 
     /// Computes the base-2 logarithm, approximately (`lg2.approx`).
     ///
@@ -218,7 +255,7 @@ pub trait F32Ext: Sized {
     /// and `±0.0` gives `-inf`. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-lg2>
-    fn log2_approx<const DEN: Denormals>(self) -> f32;
+    fn log2_approx<const DEN: Denormals>(self) -> Self;
 
     /// Computes the base-2 exponential `2^self`, approximately (`ex2.approx`).
     ///
@@ -226,14 +263,23 @@ pub trait F32Ext: Sized {
     /// inputs. `-inf` gives `+0.0` and `+inf` gives `+inf`. `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-ex2>
-    fn exp2_approx<const DEN: Denormals>(self) -> f32;
+    fn exp2_approx<const DEN: Denormals>(self) -> Self;
+
+    /// Computes the hyperbolic tangent, approximately (`tanh.approx`).
+    ///
+    /// The maximum relative error over the entire floating point range is 2^-11. Subnormal inputs
+    /// are supported. `-inf` gives `-1.0`, `+inf` gives `1.0`, `±0.0` gives `±0.0` and NaN gives
+    /// NaN.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-tanh>
+    fn tanh_approx(self) -> Self;
 
     /// Computes the absolute value.
     ///
     /// `DEN` selects the subnormal handling. A NaN input yields an unspecified NaN.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-abs>
-    fn abs_with<const DEN: Denormals>(self) -> f32;
+    fn abs_with<const DEN: Denormals>(self) -> Self;
 
     /// Finds the minimum of two values.
     ///
@@ -248,8 +294,8 @@ pub trait F32Ext: Sized {
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-min>
     fn min_with<const DEN: Denormals, const NAN: NanHandling, const XOR: XorSignAbs>(
         self,
-        rhs: f32,
-    ) -> f32;
+        rhs: Self,
+    ) -> Self;
 
     /// Finds the maximum of two values.
     ///
@@ -264,8 +310,67 @@ pub trait F32Ext: Sized {
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-max>
     fn max_with<const DEN: Denormals, const NAN: NanHandling, const XOR: XorSignAbs>(
         self,
-        rhs: f32,
-    ) -> f32;
+        rhs: Self,
+    ) -> Self;
+
+    /// Sums all lanes. For `f32`, this returns `self`.
+    ///
+    /// The lanes are added with `add.rn.f32` (round to nearest, ties to even; subnormal values
+    /// are preserved) in an unspecified order, which may differ between architectures. On
+    /// `sm_100` and later, pairs of lanes are added with `add.rn.f32x2`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add>
+    fn reduce_sum(self) -> f32;
+
+    /// Finds the minimum lane. For `f32`, this returns `self`.
+    ///
+    /// `-0.0` is treated as less than `+0.0`. NaN lanes are ignored; the result is NaN only if
+    /// all lanes are NaN. Subnormal values are preserved. See
+    /// [`reduce_min_with`](F32Ext::reduce_min_with).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-min>
+    #[inline]
+    fn reduce_min(self) -> f32 {
+        self.reduce_min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
+    }
+
+    /// Finds the maximum lane. For `f32`, this returns `self`.
+    ///
+    /// `+0.0` is treated as greater than `-0.0`. NaN lanes are ignored; the result is NaN only if
+    /// all lanes are NaN. Subnormal values are preserved. See
+    /// [`reduce_max_with`](F32Ext::reduce_max_with).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-max>
+    #[inline]
+    fn reduce_max(self) -> f32 {
+        self.reduce_max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
+    }
+
+    /// Finds the minimum lane with explicit modifiers. For `f32`, this returns `self` unchanged.
+    ///
+    /// `-0.0` is treated as less than `+0.0`. `NAN` selects whether NaN lanes are ignored
+    /// ([`NanHandling::Ignore`]; the result is NaN only if all lanes are NaN) or propagated
+    /// ([`NanHandling::Propagate`], which yields a canonical NaN if any lane is NaN). `DEN`
+    /// selects the subnormal handling.
+    ///
+    /// The lanes are combined with `min` instructions in a tree. On `sm_100` and later, the
+    /// three-input form of `min.f32` combines three values per instruction.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-min>
+    fn reduce_min_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32;
+
+    /// Finds the maximum lane with explicit modifiers. For `f32`, this returns `self` unchanged.
+    ///
+    /// `+0.0` is treated as greater than `-0.0`. `NAN` selects whether NaN lanes are ignored
+    /// ([`NanHandling::Ignore`]; the result is NaN only if all lanes are NaN) or propagated
+    /// ([`NanHandling::Propagate`], which yields a canonical NaN if any lane is NaN). `DEN`
+    /// selects the subnormal handling.
+    ///
+    /// The lanes are combined with `max` instructions in a tree. On `sm_100` and later, the
+    /// three-input form of `max.f32` combines three values per instruction.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-max>
+    fn reduce_max_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32;
 
     /// Converts to a signed 32-bit integer, rounding to an integer with `RND`.
     ///
@@ -273,7 +378,7 @@ pub trait F32Ext: Sized {
     /// is [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn to_i32<const RND: Rounding, const DEN: Denormals>(self) -> i32;
+    fn to_i32<const RND: Rounding, const DEN: Denormals>(self) -> Self::I32;
 
     /// Converts to an unsigned 32-bit integer, rounding to an integer with `RND`.
     ///
@@ -281,7 +386,7 @@ pub trait F32Ext: Sized {
     /// [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn to_u32<const RND: Rounding, const DEN: Denormals>(self) -> u32;
+    fn to_u32<const RND: Rounding, const DEN: Denormals>(self) -> Self::U32;
 
     /// Converts to a signed 64-bit integer, rounding to an integer with `RND`.
     ///
@@ -289,7 +394,7 @@ pub trait F32Ext: Sized {
     /// `DEN` is [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn to_i64<const RND: Rounding, const DEN: Denormals>(self) -> i64;
+    fn to_i64<const RND: Rounding, const DEN: Denormals>(self) -> Self::I64;
 
     /// Converts to an unsigned 64-bit integer, rounding to an integer with `RND`.
     ///
@@ -297,7 +402,7 @@ pub trait F32Ext: Sized {
     /// [`Denormals::FlushToZero`], subnormal inputs are flushed to zero.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn to_u64<const RND: Rounding, const DEN: Denormals>(self) -> u64;
+    fn to_u64<const RND: Rounding, const DEN: Denormals>(self) -> Self::U64;
 
     /// Rounds to an integral value, returned as an `f32`.
     ///
@@ -306,14 +411,14 @@ pub trait F32Ext: Sized {
     /// selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn round_to_integral<const RND: Rounding, const DEN: Denormals>(self) -> f32;
+    fn round_to_integral<const RND: Rounding, const DEN: Denormals>(self) -> Self;
 
     /// Clamps to the range `[0.0, 1.0]`. NaN becomes `+0.0`.
     ///
     /// `DEN` selects the subnormal handling.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn saturate<const DEN: Denormals>(self) -> f32;
+    fn saturate<const DEN: Denormals>(self) -> Self;
 
     /// Converts to the `tf32` format, returning its bit pattern stored in an `f32`.
     ///
@@ -331,7 +436,7 @@ pub trait F32Ext: Sized {
     /// `sm_100`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    fn to_tf32<const RND: Rounding, const RELU: Relu, const SAT: Overflow>(self) -> f32;
+    fn to_tf32<const RND: Rounding, const RELU: Relu, const SAT: Overflow>(self) -> Self;
 }
 
 /// `min.xorsign.abs` is only emitted for `sm_86` and later, since the instruction cannot be
@@ -370,6 +475,11 @@ fn cvt_tf32_rn_rz<const RND: nv::Rounding, const RELU: bool, const SATFINITE: bo
 }
 
 impl F32Ext for f32 {
+    type I32 = i32;
+    type U32 = u32;
+    type I64 = i64;
+    type U64 = u64;
+
     #[inline]
     fn add_with<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
         self,
@@ -465,6 +575,21 @@ impl F32Ext for f32 {
     }
 
     #[inline]
+    fn tanh_approx(self) -> f32 {
+        let result: f32;
+        // SAFETY: `tanh.approx.f32` only reads and writes registers.
+        unsafe {
+            asm!(
+                "tanh.approx.f32 {d}, {a};",
+                d = out(reg32) result,
+                a = in(reg32) self,
+                options(pure, nomem, nostack),
+            );
+        }
+        result
+    }
+
+    #[inline]
     fn abs_with<const DEN: Denormals>(self) -> f32 {
         with_ftz!(DEN => FTZ in unsafe { nv::abs_f32::<FTZ>(self) })
     }
@@ -499,6 +624,21 @@ impl F32Ext for f32 {
         with_ftz!(DEN => FTZ in with_nan!(NAN => N in
             with_xorsign!(XOR => X in max_f32::<FTZ, N, X>(self, rhs))
         ))
+    }
+
+    #[inline]
+    fn reduce_sum(self) -> f32 {
+        self
+    }
+
+    #[inline]
+    fn reduce_min_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32 {
+        self
+    }
+
+    #[inline]
+    fn reduce_max_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32 {
+        self
     }
 
     #[inline]
@@ -581,5 +721,478 @@ impl F32Ext for f32 {
             _ => unreachable!(),
         };
         f32::from_bits(bits)
+    }
+}
+
+/// Applies `f` to every lane of `a`.
+#[inline(always)]
+fn map1<const N: usize, R: SimdElement>(a: Simd<f32, N>, f: impl Fn(f32) -> R) -> Simd<R, N> {
+    let a = a.to_array();
+    Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i])))
+}
+
+/// Applies `f` to every pair of lanes of `a` and `b`.
+#[inline(always)]
+fn map2<const N: usize>(
+    a: Simd<f32, N>,
+    b: Simd<f32, N>,
+    f: impl Fn(f32, f32) -> f32,
+) -> Simd<f32, N> {
+    let (a, b) = (a.to_array(), b.to_array());
+    Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i])))
+}
+
+/// Applies `f` to every triple of lanes of `a`, `b` and `c`.
+#[inline(always)]
+fn map3<const N: usize>(
+    a: Simd<f32, N>,
+    b: Simd<f32, N>,
+    c: Simd<f32, N>,
+    f: impl Fn(f32, f32, f32) -> f32,
+) -> Simd<f32, N> {
+    let (a, b, c) = (a.to_array(), b.to_array(), c.to_array());
+    Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i], c[i])))
+}
+
+/// Reduces the lanes of `x` to a single value. Lanes `2 * i` and `2 * i + 1` form pair `i`; the
+/// pairs are combined lane-wise with `pair_op` in a tree, and the two lanes of the final pair
+/// (and the last lane if `N` is odd) with `op`.
+///
+/// The pairs are kept in `x`, used as a ring buffer of `N / 2` pairs holding a FIFO queue: step
+/// `k` pops the pairs at queue positions `2 * k` and `2 * k + 1` and pushes their combination at
+/// queue position `N / 2 + k`, i.e. into pair `k`. All indices are constant after unrolling.
+#[inline(always)]
+fn reduce_pairs<const N: usize>(
+    mut x: [f32; N],
+    pair_op: impl Fn([f32; 2], [f32; 2]) -> [f32; 2],
+    op: impl Fn(f32, f32) -> f32,
+) -> f32 {
+    let p = N / 2;
+    if p == 0 {
+        return x[0];
+    }
+    #[rustc_unroll(full)]
+    for k in 0..p - 1 {
+        let (a, b) = (2 * k % p, (2 * k + 1) % p);
+        [x[2 * k], x[2 * k + 1]] = pair_op([x[2 * a], x[2 * a + 1]], [x[2 * b], x[2 * b + 1]]);
+    }
+    let last = (2 * p - 2) % p;
+    let r = op(x[2 * last], x[2 * last + 1]);
+    if N % 2 == 1 { op(r, x[N - 1]) } else { r }
+}
+
+/// Reduces the lanes of `x` to a single value, combining three values per step with `op3`, and
+/// two values with `op2` in the last step if `N` is even.
+///
+/// `x` is used as a ring buffer holding a FIFO queue of values: step `k` pops the values at queue
+/// positions `3 * k` to `3 * k + 2` and pushes their combination at queue position `N + k`, i.e.
+/// into lane `k`. All indices are constant after unrolling.
+#[cfg(target_feature = "sm_100")]
+#[inline(always)]
+fn reduce_triples<const N: usize>(
+    mut x: [f32; N],
+    op3: impl Fn(f32, f32, f32) -> f32,
+    op2: impl Fn(f32, f32) -> f32,
+) -> f32 {
+    let mut steps = (N - 1) / 2;
+    #[rustc_unroll(full)]
+    for k in 0..steps {
+        x[k] = op3(x[3 * k % N], x[(3 * k + 1) % N], x[(3 * k + 2) % N]);
+    }
+    if N.is_multiple_of(2) {
+        x[steps] = op2(x[3 * steps % N], x[(3 * steps + 1) % N]);
+        steps += 1;
+    }
+    x[(N + steps - 1) % N]
+}
+
+/// The three-input `min` and `max` instructions of `sm_100`.
+#[cfg(target_feature = "sm_100")]
+mod minmax3 {
+    use super::*;
+
+    macro_rules! emit_minmax3 {
+        ($op:literal $d:ident $a:ident $b:ident $c:ident $ftz:literal, $nan:literal) => {
+            // SAFETY: the instruction only reads and writes registers.
+            unsafe {
+                asm!(
+                    concat!($op, $ftz, $nan, ".f32 {d}, {a}, {b}, {c};"),
+                    d = out(reg32) $d,
+                    a = in(reg32) $a,
+                    b = in(reg32) $b,
+                    c = in(reg32) $c,
+                    options(pure, nomem, nostack),
+                )
+            }
+        };
+    }
+
+    macro_rules! minmax3_fn {
+        ($name:ident, $op:literal) => {
+            #[inline(always)]
+            pub(super) fn $name<const DEN: Denormals, const NAN: NanHandling>(
+                a: f32,
+                b: f32,
+                c: f32,
+            ) -> f32 {
+                let mut d = 0.0f32;
+                asm_variants!(emit_minmax3!($op d a b c);
+                    DEN => {
+                        Denormals::Preserve => "",
+                        Denormals::FlushToZero => ".ftz",
+                    },
+                    NAN => {
+                        NanHandling::Ignore => "",
+                        NanHandling::Propagate => ".NaN",
+                    },
+                );
+                d
+            }
+        };
+    }
+
+    minmax3_fn!(min, "min");
+    minmax3_fn!(max, "max");
+}
+
+/// The packed `f32x2` instructions of `sm_100`, whose operands are `.b64` registers holding two
+/// `f32` values each, with the first lane in the low 32 bits.
+#[cfg(target_feature = "sm_100")]
+mod packed {
+    use super::*;
+
+    /// Emits `$op` on pairs of lanes. The pairs are packed into `.b64` registers and unpacked
+    /// again inside the assembly block, with `mov.b64`.
+    macro_rules! emit_f32x2 {
+        ($op:literal $d:ident $a:ident $b:ident $rnd:literal, $ftz:literal) => {
+            // SAFETY: the instruction only reads and writes registers.
+            unsafe {
+                asm!(
+                    "{{",
+                    ".reg .b64 %pa, %pb, %pd;",
+                    "mov.b64 %pa, {{{a0}, {a1}}};",
+                    "mov.b64 %pb, {{{b0}, {b1}}};",
+                    concat!($op, $rnd, $ftz, ".f32x2 %pd, %pa, %pb;"),
+                    "mov.b64 {{{d0}, {d1}}}, %pd;",
+                    "}}",
+                    d0 = out(reg32) $d[0],
+                    d1 = out(reg32) $d[1],
+                    a0 = in(reg32) $a[0],
+                    a1 = in(reg32) $a[1],
+                    b0 = in(reg32) $b[0],
+                    b1 = in(reg32) $b[1],
+                    options(pure, nomem, nostack),
+                )
+            }
+        };
+        ($op:literal $d:ident $a:ident $b:ident $c:ident $rnd:literal, $ftz:literal) => {
+            // SAFETY: the instruction only reads and writes registers.
+            unsafe {
+                asm!(
+                    "{{",
+                    ".reg .b64 %pa, %pb, %pc, %pd;",
+                    "mov.b64 %pa, {{{a0}, {a1}}};",
+                    "mov.b64 %pb, {{{b0}, {b1}}};",
+                    "mov.b64 %pc, {{{c0}, {c1}}};",
+                    concat!($op, $rnd, $ftz, ".f32x2 %pd, %pa, %pb, %pc;"),
+                    "mov.b64 {{{d0}, {d1}}}, %pd;",
+                    "}}",
+                    d0 = out(reg32) $d[0],
+                    d1 = out(reg32) $d[1],
+                    a0 = in(reg32) $a[0],
+                    a1 = in(reg32) $a[1],
+                    b0 = in(reg32) $b[0],
+                    b1 = in(reg32) $b[1],
+                    c0 = in(reg32) $c[0],
+                    c1 = in(reg32) $c[1],
+                    options(pure, nomem, nostack),
+                )
+            }
+        };
+    }
+
+    /// Defines a function emitting the packed instruction `$op` on pairs of lanes, with the given
+    /// source operands.
+    macro_rules! packed_fn {
+        ($name:ident, $op:literal, $($src:ident),+) => {
+            #[inline(always)]
+            pub(super) fn $name<const RND: Rounding, const DEN: Denormals>(
+                $($src: [f32; 2]),+
+            ) -> [f32; 2] {
+                const { assert_ieee_rounding(RND) };
+                let mut d = [0.0f32; 2];
+                asm_variants!(emit_f32x2!($op d $($src)+);
+                    RND => {
+                        Rounding::NearestEven => ".rn",
+                        Rounding::TowardZero => ".rz",
+                        Rounding::Down => ".rm",
+                        Rounding::Up => ".rp",
+                    },
+                    DEN => {
+                        Denormals::Preserve => "",
+                        Denormals::FlushToZero => ".ftz",
+                    },
+                );
+                d
+            }
+        };
+    }
+
+    packed_fn!(add, "add", a, b);
+    packed_fn!(mul, "mul", a, b);
+    packed_fn!(fma, "fma", a, b, c);
+
+    /// Applies `packed` to every pair of lanes of `a` and `b`, and `scalar` to the last lane if
+    /// `N` is odd.
+    #[inline(always)]
+    pub(super) fn map2<const N: usize>(
+        a: Simd<f32, N>,
+        b: Simd<f32, N>,
+        packed: impl Fn([f32; 2], [f32; 2]) -> [f32; 2],
+        scalar: impl Fn(f32, f32) -> f32,
+    ) -> Simd<f32, N> {
+        let (a, b) = (a.to_array(), b.to_array());
+        let mut out = [0.0; N];
+        let mut i = 0;
+        #[rustc_unroll(full)]
+        while i + 2 <= N {
+            [out[i], out[i + 1]] = packed([a[i], a[i + 1]], [b[i], b[i + 1]]);
+            i += 2;
+        }
+        if i < N {
+            out[i] = scalar(a[i], b[i]);
+        }
+        Simd::from_array(out)
+    }
+
+    /// Applies `packed` to every pair of lanes of `a`, `b` and `c`, and `scalar` to the last lane
+    /// if `N` is odd.
+    #[inline(always)]
+    pub(super) fn map3<const N: usize>(
+        a: Simd<f32, N>,
+        b: Simd<f32, N>,
+        c: Simd<f32, N>,
+        packed: impl Fn([f32; 2], [f32; 2], [f32; 2]) -> [f32; 2],
+        scalar: impl Fn(f32, f32, f32) -> f32,
+    ) -> Simd<f32, N> {
+        let (a, b, c) = (a.to_array(), b.to_array(), c.to_array());
+        let mut out = [0.0; N];
+        let mut i = 0;
+        #[rustc_unroll(full)]
+        while i + 2 <= N {
+            [out[i], out[i + 1]] = packed([a[i], a[i + 1]], [b[i], b[i + 1]], [c[i], c[i + 1]]);
+            i += 2;
+        }
+        if i < N {
+            out[i] = scalar(a[i], b[i], c[i]);
+        }
+        Simd::from_array(out)
+    }
+}
+
+impl<const N: usize> F32Ext for Simd<f32, N> {
+    type I32 = Simd<i32, N>;
+    type U32 = Simd<u32, N>;
+    type I64 = Simd<i64, N>;
+    type U64 = Simd<u64, N>;
+
+    #[inline]
+    fn add_with<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
+        self,
+        rhs: Self,
+    ) -> Self {
+        #[cfg(target_feature = "sm_100")]
+        if const { !matches!(SAT, Saturation::ClampToUnit) } {
+            return packed::map2(self, rhs, packed::add::<RND, DEN>, |a, b| {
+                a.add_with::<RND, DEN, SAT>(b)
+            });
+        }
+        map2(self, rhs, |a, b| a.add_with::<RND, DEN, SAT>(b))
+    }
+
+    #[inline]
+    fn mul_with<const RND: Rounding, const DEN: Denormals>(self, rhs: Self) -> Self {
+        #[cfg(target_feature = "sm_100")]
+        return packed::map2(self, rhs, packed::mul::<RND, DEN>, |a, b| {
+            a.mul_with::<RND, DEN>(b)
+        });
+        #[cfg(not(target_feature = "sm_100"))]
+        map2(self, rhs, |a, b| a.mul_with::<RND, DEN>(b))
+    }
+
+    #[inline]
+    fn fma<const RND: Rounding, const DEN: Denormals, const SAT: Saturation>(
+        self,
+        b: Self,
+        c: Self,
+    ) -> Self {
+        #[cfg(target_feature = "sm_100")]
+        if const { !matches!(SAT, Saturation::ClampToUnit) } {
+            return packed::map3(self, b, c, packed::fma::<RND, DEN>, |a, b, c| {
+                a.fma::<RND, DEN, SAT>(b, c)
+            });
+        }
+        map3(self, b, c, |a, b, c| a.fma::<RND, DEN, SAT>(b, c))
+    }
+
+    #[inline]
+    fn div_with<const RND: Rounding, const DEN: Denormals>(self, rhs: Self) -> Self {
+        map2(self, rhs, |a, b| a.div_with::<RND, DEN>(b))
+    }
+
+    #[inline]
+    fn div_approx<const DEN: Denormals>(self, rhs: Self) -> Self {
+        map2(self, rhs, |a, b| a.div_approx::<DEN>(b))
+    }
+
+    #[inline]
+    fn div_full_approx<const DEN: Denormals>(self, rhs: Self) -> Self {
+        map2(self, rhs, |a, b| a.div_full_approx::<DEN>(b))
+    }
+
+    #[inline]
+    fn rcp_with<const RND: Rounding, const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.rcp_with::<RND, DEN>())
+    }
+
+    #[inline]
+    fn rcp_approx_ftz(self) -> Self {
+        map1(self, |a| a.rcp_approx_ftz())
+    }
+
+    #[inline]
+    fn sqrt_with<const RND: Rounding, const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.sqrt_with::<RND, DEN>())
+    }
+
+    #[inline]
+    fn sqrt_approx<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.sqrt_approx::<DEN>())
+    }
+
+    #[inline]
+    fn rsqrt_approx<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.rsqrt_approx::<DEN>())
+    }
+
+    #[inline]
+    fn sin_approx<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.sin_approx::<DEN>())
+    }
+
+    #[inline]
+    fn cos_approx<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.cos_approx::<DEN>())
+    }
+
+    #[inline]
+    fn log2_approx<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.log2_approx::<DEN>())
+    }
+
+    #[inline]
+    fn exp2_approx<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.exp2_approx::<DEN>())
+    }
+
+    #[inline]
+    fn tanh_approx(self) -> Self {
+        map1(self, |a| a.tanh_approx())
+    }
+
+    #[inline]
+    fn abs_with<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.abs_with::<DEN>())
+    }
+
+    #[inline]
+    fn min_with<const DEN: Denormals, const NAN: NanHandling, const XOR: XorSignAbs>(
+        self,
+        rhs: Self,
+    ) -> Self {
+        map2(self, rhs, |a, b| a.min_with::<DEN, NAN, XOR>(b))
+    }
+
+    #[inline]
+    fn max_with<const DEN: Denormals, const NAN: NanHandling, const XOR: XorSignAbs>(
+        self,
+        rhs: Self,
+    ) -> Self {
+        map2(self, rhs, |a, b| a.max_with::<DEN, NAN, XOR>(b))
+    }
+
+    #[inline]
+    fn reduce_sum(self) -> f32 {
+        let add = |a: f32, b: f32| {
+            a.add_with::<{ Rounding::NearestEven }, { Denormals::Preserve }, { Saturation::None }>(
+                b,
+            )
+        };
+        #[cfg(target_feature = "sm_100")]
+        let pair_add = packed::add::<{ Rounding::NearestEven }, { Denormals::Preserve }>;
+        #[cfg(not(target_feature = "sm_100"))]
+        let pair_add = |a: [f32; 2], b: [f32; 2]| [add(a[0], b[0]), add(a[1], b[1])];
+        reduce_pairs(self.to_array(), pair_add, add)
+    }
+
+    #[inline]
+    fn reduce_min_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32 {
+        let min = |a: f32, b: f32| a.min_with::<DEN, NAN, { XorSignAbs::Disabled }>(b);
+        #[cfg(target_feature = "sm_100")]
+        return reduce_triples(self.to_array(), minmax3::min::<DEN, NAN>, min);
+        #[cfg(not(target_feature = "sm_100"))]
+        reduce_pairs(
+            self.to_array(),
+            |a, b| [min(a[0], b[0]), min(a[1], b[1])],
+            min,
+        )
+    }
+
+    #[inline]
+    fn reduce_max_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32 {
+        let max = |a: f32, b: f32| a.max_with::<DEN, NAN, { XorSignAbs::Disabled }>(b);
+        #[cfg(target_feature = "sm_100")]
+        return reduce_triples(self.to_array(), minmax3::max::<DEN, NAN>, max);
+        #[cfg(not(target_feature = "sm_100"))]
+        reduce_pairs(
+            self.to_array(),
+            |a, b| [max(a[0], b[0]), max(a[1], b[1])],
+            max,
+        )
+    }
+
+    #[inline]
+    fn to_i32<const RND: Rounding, const DEN: Denormals>(self) -> Self::I32 {
+        map1(self, |a| a.to_i32::<RND, DEN>())
+    }
+
+    #[inline]
+    fn to_u32<const RND: Rounding, const DEN: Denormals>(self) -> Self::U32 {
+        map1(self, |a| a.to_u32::<RND, DEN>())
+    }
+
+    #[inline]
+    fn to_i64<const RND: Rounding, const DEN: Denormals>(self) -> Self::I64 {
+        map1(self, |a| a.to_i64::<RND, DEN>())
+    }
+
+    #[inline]
+    fn to_u64<const RND: Rounding, const DEN: Denormals>(self) -> Self::U64 {
+        map1(self, |a| a.to_u64::<RND, DEN>())
+    }
+
+    #[inline]
+    fn round_to_integral<const RND: Rounding, const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.round_to_integral::<RND, DEN>())
+    }
+
+    #[inline]
+    fn saturate<const DEN: Denormals>(self) -> Self {
+        map1(self, |a| a.saturate::<DEN>())
+    }
+
+    #[inline]
+    fn to_tf32<const RND: Rounding, const RELU: Relu, const SAT: Overflow>(self) -> Self {
+        map1(self, |a| a.to_tf32::<RND, RELU, SAT>())
     }
 }
