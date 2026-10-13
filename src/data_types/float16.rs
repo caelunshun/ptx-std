@@ -10,7 +10,10 @@ use core::{
     simd::Simd,
 };
 
-use super::vector::{half_f32_wide, half_reduce_sum, vector_partial_eq, vector_types};
+use super::{
+    array_from_fn,
+    vector::{Pairs, SupportedVectorLen, VectorLen, cast, half_vector, vector_element},
+};
 
 /// Alias for the unstable primitive `f16`, which our `f16` type shadows at the module root.
 mod prim {
@@ -379,7 +382,7 @@ impl f16 {
     /// Returns the minimum of two values with explicit modifiers.
     ///
     /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// are flushed to sign-preserving zero. `NAN` selects the NaN handling: [`NanHandling::Ignore`]
     /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
     /// canonical NaN if either input is NaN. `X` selects whether the result has the minimum
     /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
@@ -387,7 +390,7 @@ impl f16 {
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline]
-    pub fn min_with<const D: Denormals, const N: NanHandling, const X: XorSignAbs>(
+    pub fn min_with<const D: Denormals, const NAN: NanHandling, const X: XorSignAbs>(
         self,
         other: Self,
     ) -> Self {
@@ -399,15 +402,15 @@ impl f16 {
         }
         let (a, b) = (self.prim(), other.prim());
         const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
-            const_bool!(NAN = matches!(N, NanHandling::Propagate) =>
+            const_bool!(PROP = matches!(NAN, NanHandling::Propagate) =>
                 const_bool!(XS = matches!(X, XorSignAbs::Enabled) =>
-                    Self::from_prim(unsafe { nv::min_f16::<FTZ, NAN, XS>(a, b) }))))
+                    Self::from_prim(unsafe { nv::min_f16::<FTZ, PROP, XS>(a, b) }))))
     }
 
     /// Returns the maximum of two values with explicit modifiers.
     ///
     /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// are flushed to sign-preserving zero. `NAN` selects the NaN handling: [`NanHandling::Ignore`]
     /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
     /// canonical NaN if either input is NaN. `X` selects whether the result has the maximum
     /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
@@ -415,7 +418,7 @@ impl f16 {
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline]
-    pub fn max_with<const D: Denormals, const N: NanHandling, const X: XorSignAbs>(
+    pub fn max_with<const D: Denormals, const NAN: NanHandling, const X: XorSignAbs>(
         self,
         other: Self,
     ) -> Self {
@@ -427,9 +430,9 @@ impl f16 {
         }
         let (a, b) = (self.prim(), other.prim());
         const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
-            const_bool!(NAN = matches!(N, NanHandling::Propagate) =>
+            const_bool!(PROP = matches!(NAN, NanHandling::Propagate) =>
                 const_bool!(XS = matches!(X, XorSignAbs::Enabled) =>
-                    Self::from_prim(unsafe { nv::max_f16::<FTZ, NAN, XS>(a, b) }))))
+                    Self::from_prim(unsafe { nv::max_f16::<FTZ, PROP, XS>(a, b) }))))
     }
 }
 
@@ -537,76 +540,36 @@ impl MulAssign for f16 {
     }
 }
 
-vector_types! {
-    elem: f16, pack: bytes,
+vector_element! {
+    elem: f16, pair: u32, packing: Bytes,
     consts: [
         ZERO, NEG_ZERO, ONE, NEG_ONE, INFINITY, NEG_INFINITY, NAN, MAX, MIN, MIN_POSITIVE,
         MIN_POSITIVE_SUBNORMAL, EPSILON
     ],
     note: "Arithmetic operators act element-wise, round to nearest, ties to even, and preserve subnormal values. Methods suffixed `_with` select instruction modifiers (flush-to-zero, saturation, ...) via const generics.",
-    x2: f16x2(u32),
-    x4: f16x4(u64),
-    x8: f16x8(u128),
-    x16: f16x16([u128; 2]),
-    x32: f16x32([u128; 4]),
+    eq: elementwise,
+    aliases: f16xN, f16x2, f16x4, f16x8, f16x16, f16x32,
 }
 
-vector_partial_eq!(f16x2, f16x4, f16x8, f16x16, f16x32);
+half_vector!(f16, "f16");
 
-half_f32_wide!(f16x4, f16x2, f16, n: 4, pairs: 2);
-half_f32_wide!(f16x8, f16x2, f16, n: 8, pairs: 4);
-half_f32_wide!(f16x16, f16x2, f16, n: 16, pairs: 8);
-half_f32_wide!(f16x32, f16x2, f16, n: 32, pairs: 16);
-
+// The instructions of the vectors operate on pairs. Each operation is implemented once on the pair
+// type, and then lifted to all lengths by the generic impl below.
 impl f16x2 {
-    #[inline]
+    #[inline(always)]
     fn to_core(self) -> nv::f16x2 {
-        unsafe { transmute::<u32, nv::f16x2>(self.0) }
+        unsafe { transmute::<u32, nv::f16x2>(self.to_bits()) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn from_core(x: nv::f16x2) -> Self {
-        Self(unsafe { transmute::<nv::f16x2, u32>(x) })
+        Self::from_bits(unsafe { transmute::<nv::f16x2, u32>(x) })
     }
 
-    /// Converts two `f32` values to `f16`, rounding to nearest, ties to even.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    #[inline]
-    pub fn from_f32(x: Simd<f32, 2>) -> Self {
-        Self::from_f32_with::<{ Rounding::NearestEven }, { Relu::Disabled }, { Overflow::Infinity }>(
-            x,
-        )
-    }
-
-    /// Converts both elements to `f32`. This conversion is exact.
-    #[inline]
-    pub fn to_f32(self) -> Simd<f32, 2> {
-        // A vector conversion lets LLVM unpack the pair with `mov.b32 {lo, hi}`, which `ptxas`
-        // turns into half selectors.
-        let x = unsafe { transmute::<u32, Simd<prim::F16, 2>>(self.0) };
-        core::simd::num::SimdFloat::cast::<f32>(x)
-    }
-
-    /// Converts two `f32` values to `f16`, with explicit rounding and modifiers.
-    ///
-    /// - `RND` selects the rounding mode and must be [`Rounding::NearestEven`] or
-    ///   [`Rounding::TowardZero`].
-    /// - `R` optionally clamps negative results to zero (NaN results become canonical NaN).
-    /// - `O` selects whether out-of-range results become infinity or are clamped to the finite
-    ///   range of `f16` (`.satfinite`; NaN inputs still produce NaN).
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-    #[inline]
-    pub fn from_f32_with<const RND: Rounding, const R: Relu, const O: Overflow>(
-        x: Simd<f32, 2>,
+    #[inline(always)]
+    fn pair_from_f32_with<const RND: Rounding, const R: Relu, const O: Overflow>(
+        x: [f32; 2],
     ) -> Self {
-        const {
-            assert!(
-                matches!(RND, Rounding::NearestEven | Rounding::TowardZero),
-                "f16x2 conversion only supports NearestEven and TowardZero rounding"
-            );
-        }
         const_map!(RND => ROUND: nv::Rounding {
             Rounding::NearestEven => nv::Rounding::Rn,
             Rounding::TowardZero => nv::Rounding::Rz,
@@ -615,61 +578,30 @@ impl f16x2 {
                 Self::from_core(unsafe { nv::cvt_f16x2_f32::<ROUND, RELU, SAT>(x[1], x[0]) }))))
     }
 
-    /// Converts two `f32` values to `f16` using stochastic rounding.
-    ///
-    /// Each result is rounded towards or away from zero depending on the carry out of adding the
-    /// random bits to the mantissa bits discarded by the conversion. The 13 least significant bits
-    /// of the upper half of `rbits` are used for `x[1]` and those of the lower half for `x[0]`; the
-    /// remaining bits are ignored. `R` optionally clamps negative results to zero. `O` selects
-    /// whether out-of-range results become infinity or are clamped to the finite range of `f16`.
-    ///
-    /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
+    #[inline(always)]
+    fn pair_to_f32(self) -> [f32; 2] {
+        // A vector conversion lets LLVM unpack the pair with `mov.b32 {lo, hi}`, which `ptxas`
+        // turns into half selectors.
+        let x = unsafe { transmute::<u32, Simd<prim::F16, 2>>(self.to_bits()) };
+        core::simd::num::SimdFloat::cast::<f32>(x).to_array()
+    }
+
     #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
-    #[inline]
-    pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
-        x: Simd<f32, 2>,
-        rbits: u32,
-    ) -> Self {
+    #[inline(always)]
+    fn pair_from_f32_stochastic<const R: Relu, const O: Overflow>(x: [f32; 2], rbits: u32) -> Self {
         const_bool!(RELU = matches!(R, Relu::Enabled) =>
             const_bool!(SAT = matches!(O, Overflow::SaturateFinite) =>
                 Self::from_core(unsafe { nv::cvt_rs_f16x2_f32::<RELU, SAT>(x[1], x[0], rbits) })))
     }
 
-    /// Computes the absolute value of each element. A NaN input yields an unspecified NaN.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
-    #[inline]
-    pub fn abs(self) -> Self {
-        self.abs_with::<{ Denormals::Preserve }>()
-    }
-
-    /// Computes the absolute value of each element, optionally flushing subnormal inputs and
-    /// results to sign-preserving zero. A NaN input yields an unspecified NaN.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
-    #[inline]
-    pub fn abs_with<const D: Denormals>(self) -> Self {
+    #[inline(always)]
+    fn pair_abs_with<const D: Denormals>(self) -> Self {
         const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
             Self::from_core(unsafe { nv::abs_f16x2::<FTZ>(self.to_core()) }))
     }
 
-    /// Adds element-wise with explicit modifiers; rounds to nearest, ties to even.
-    ///
-    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
-    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
-    /// optionally clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`).
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-add>
-    #[inline]
-    pub fn add_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
-        const {
-            assert!(
-                matches!(D, Denormals::Preserve) || matches!(S, Saturation::ClampToUnit),
-                "FlushToZero is only supported together with ClampToUnit saturation"
-            );
-        }
+    #[inline(always)]
+    fn pair_add_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
         let (a, b) = (self.to_core(), rhs.to_core());
         if matches!(S, Saturation::ClampToUnit) {
             const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
@@ -679,31 +611,13 @@ impl f16x2 {
         }
     }
 
-    /// Subtracts element-wise with explicit modifiers; rounds to nearest, ties to even.
-    ///
-    /// Implemented as `self + (-rhs)`; see [`add_with`](Self::add_with) for the modifiers.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-sub>
-    #[inline]
-    pub fn sub_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
-        self.add_with::<D, S>(-rhs)
+    #[inline(always)]
+    fn pair_sub(self, rhs: Self) -> Self {
+        Self::from_core(unsafe { nv::sub_f16x2(self.to_core(), rhs.to_core()) })
     }
 
-    /// Multiplies element-wise with explicit modifiers; rounds to nearest, ties to even.
-    ///
-    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
-    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
-    /// optionally clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`).
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-mul>
-    #[inline]
-    pub fn mul_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
-        const {
-            assert!(
-                matches!(D, Denormals::Preserve) || matches!(S, Saturation::ClampToUnit),
-                "FlushToZero is only supported together with ClampToUnit saturation"
-            );
-        }
+    #[inline(always)]
+    fn pair_mul_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
         let (a, b) = (self.to_core(), rhs.to_core());
         if matches!(S, Saturation::ClampToUnit) {
             const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
@@ -713,34 +627,17 @@ impl f16x2 {
         }
     }
 
-    /// Element-wise fused multiply-add: computes `self * b + c` with a single rounding (to
-    /// nearest, ties to even).
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
-    #[inline]
-    pub fn mul_add(self, b: Self, c: Self) -> Self {
-        self.mul_add_with::<{ Denormals::Preserve }, { Saturation::None }, { Relu::Disabled }>(b, c)
+    #[inline(always)]
+    fn pair_neg(self) -> Self {
+        Self::from_core(unsafe { nv::neg_f16x2(self.to_core()) })
     }
 
-    /// Element-wise fused multiply-add with explicit modifiers.
-    ///
-    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero. `S`
-    /// clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`), and `R` clamps negative
-    /// results to zero (NaN results become canonical NaN); they cannot be combined.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
-    #[inline]
-    pub fn mul_add_with<const D: Denormals, const S: Saturation, const R: Relu>(
+    #[inline(always)]
+    fn pair_mul_add_with<const D: Denormals, const S: Saturation, const R: Relu>(
         self,
         b: Self,
         c: Self,
     ) -> Self {
-        const {
-            assert!(
-                matches!(S, Saturation::None) || matches!(R, Relu::Disabled),
-                "ClampToUnit saturation and Relu cannot be combined"
-            );
-        }
         let (a, b, c) = (self.to_core(), b.to_core(), c.to_core());
         const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
         if matches!(S, Saturation::ClampToUnit) {
@@ -751,47 +648,22 @@ impl f16x2 {
         })
     }
 
-    /// Element-wise fused multiply-add with the out-of-bounds (OOB) modifier.
-    ///
-    /// Each result is forced to `+0.0` if either operand element is an [OOB-NaN], the special NaN
-    /// produced by out-of-bounds elements of tensor accesses in the `OOB-NaN` fill mode. The test
-    /// is performed independently for each element. `R` optionally clamps negative results to
-    /// zero.
-    ///
-    /// Requires `sm_90`.
-    ///
-    /// [OOB-NaN]: https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-tiled-mode-oob-access
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[cfg(target_feature = "sm_90")]
-    #[inline]
-    pub fn mul_add_oob<const R: Relu>(self, b: Self, c: Self) -> Self {
+    #[inline(always)]
+    fn pair_mul_add_oob<const R: Relu>(self, b: Self, c: Self) -> Self {
         const_bool!(RELU = matches!(R, Relu::Enabled) =>
         Self::from_core(unsafe {
             nv::fma_oob_f16x2::<RELU>(self.to_core(), b.to_core(), c.to_core())
         }))
     }
 
-    /// Computes `2^x` of each element, approximately (`ex2.approx.f16x2`).
-    ///
-    /// The maximum relative error of each element is 2^-9.9 (as for `ex2.approx.f16`). Subnormal
-    /// inputs are supported. `-inf` gives `+0.0` and `+inf` gives `+inf`.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-ex2>
-    #[inline]
-    pub fn exp2_approx(self) -> Self {
+    #[inline(always)]
+    fn pair_exp2_approx(self) -> Self {
         Self::from_core(unsafe { nv::ex2_f16x2(self.to_core()) })
     }
 
-    /// Computes the hyperbolic tangent of each element, approximately (`tanh.approx.f16x2`).
-    ///
-    /// The maximum absolute error of each element is 2^-10.987 (as for `tanh.approx.f16`).
-    /// Subnormal inputs are supported. `-inf` gives `-1.0`, `+inf` gives `+1.0`, and zeros are
-    /// preserved including their sign.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-tanh>
-    #[inline]
-    pub fn tanh_approx(self) -> Self {
+    #[inline(always)]
+    fn pair_tanh_approx(self) -> Self {
         let result: u32;
         // SAFETY: `tanh.approx.f16x2` only reads and writes registers.
         unsafe {
@@ -805,89 +677,35 @@ impl f16x2 {
         Self::from_bits(result)
     }
 
-    /// Returns the element-wise minimum. If exactly one input element is NaN, the other is
-    /// returned. `-0.0` is treated as less than `+0.0`.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-    #[inline]
-    pub fn min(self, other: Self) -> Self {
-        self.min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Disabled }>(
-            other,
-        )
-    }
-
-    /// Returns the element-wise maximum. If exactly one input element is NaN, the other is
-    /// returned. `+0.0` is treated as greater than `-0.0`.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-    #[inline]
-    pub fn max(self, other: Self) -> Self {
-        self.max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Disabled }>(
-            other,
-        )
-    }
-
-    /// Returns the element-wise minimum with explicit modifiers.
-    ///
-    /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
-    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
-    /// canonical NaN if either input is NaN. `X` selects whether each result has the minimum
-    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
-    /// this requires `sm_86`.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-    #[inline]
-    pub fn min_with<const D: Denormals, const N: NanHandling, const X: XorSignAbs>(
+    #[inline(always)]
+    fn pair_min_with<const D: Denormals, const NAN: NanHandling, const X: XorSignAbs>(
         self,
         other: Self,
     ) -> Self {
-        const {
-            assert!(
-                matches!(X, XorSignAbs::Disabled) || cfg!(target_feature = "sm_86"),
-                "XorSignAbs requires sm_86"
-            );
-        }
         let (a, b) = (self.to_core(), other.to_core());
         const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
-            const_bool!(NAN = matches!(N, NanHandling::Propagate) =>
+            const_bool!(PROP = matches!(NAN, NanHandling::Propagate) =>
                 const_bool!(XS = matches!(X, XorSignAbs::Enabled) =>
-                    Self::from_core(unsafe { nv::min_f16x2::<FTZ, NAN, XS>(a, b) }))))
+                    Self::from_core(unsafe { nv::min_f16x2::<FTZ, PROP, XS>(a, b) }))))
     }
 
-    /// Returns the element-wise maximum with explicit modifiers.
-    ///
-    /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal inputs and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
-    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
-    /// canonical NaN if either input is NaN. `X` selects whether each result has the maximum
-    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
-    /// this requires `sm_86`.
-    ///
-    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-    #[inline]
-    pub fn max_with<const D: Denormals, const N: NanHandling, const X: XorSignAbs>(
+    #[inline(always)]
+    fn pair_max_with<const D: Denormals, const NAN: NanHandling, const X: XorSignAbs>(
         self,
         other: Self,
     ) -> Self {
-        const {
-            assert!(
-                matches!(X, XorSignAbs::Disabled) || cfg!(target_feature = "sm_86"),
-                "XorSignAbs requires sm_86"
-            );
-        }
         let (a, b) = (self.to_core(), other.to_core());
         const_bool!(FTZ = matches!(D, Denormals::FlushToZero) =>
-            const_bool!(NAN = matches!(N, NanHandling::Propagate) =>
+            const_bool!(PROP = matches!(NAN, NanHandling::Propagate) =>
                 const_bool!(XS = matches!(X, XorSignAbs::Enabled) =>
-                    Self::from_core(unsafe { nv::max_f16x2::<FTZ, NAN, XS>(a, b) }))))
+                    Self::from_core(unsafe { nv::max_f16x2::<FTZ, PROP, XS>(a, b) }))))
     }
 
     /// Computes `[acc[0] + lo, acc[1] + hi]` in `f32` with the mixed-precision
     /// `add.rn.f32.f16`. The pair is split inside the assembly, so that `ptxas` can select the
     /// halves with operand modifiers.
     #[cfg(target_feature = "sm_100")]
-    #[inline]
+    #[inline(always)]
     fn add_to_f32x2(self, acc: [f32; 2]) -> [f32; 2] {
         let (lo, hi): (f32, f32);
         // SAFETY: the instructions only read and write registers.
@@ -909,13 +727,261 @@ impl f16x2 {
         }
         [lo, hi]
     }
+}
+
+impl<const N: usize> f16xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
+    /// Converts all elements to `f32`. This conversion is exact.
+    #[inline(always)]
+    pub fn to_f32(self) -> Simd<f32, N> {
+        let x2s = self.to_x2s();
+        let pairs: Pairs<[f32; 2], N> = array_from_fn(|i| x2s[i].pair_to_f32());
+        // SAFETY: the arrays have the same size and hold the same elements.
+        Simd::from_array(unsafe { cast(pairs) })
+    }
+
+    /// Converts `f32` values to `f16` using stochastic rounding.
+    ///
+    /// Element `i` of the result is converted from element `i` of `x`. Each result is rounded
+    /// towards or away from zero depending on the carry out of adding the random bits to the
+    /// mantissa bits discarded by the conversion. `rbits[i]` supplies the random bits of the pair
+    /// formed by elements `2 * i` and `2 * i + 1`: the 13 least significant bits of its upper half
+    /// are used for the odd element and those of its lower half for the even element; the
+    /// remaining bits are ignored. `R` optionally clamps negative results to zero. `O` selects
+    /// whether out-of-range results become infinity or are clamped to the finite range of `f16`.
+    ///
+    /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
+    #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
+    #[inline(always)]
+    pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
+        x: Simd<f32, N>,
+        rbits: Pairs<u32, N>,
+    ) -> Self {
+        let x = x.to_array();
+        Self::from_x2s(array_from_fn(|i| {
+            f16x2::pair_from_f32_stochastic::<R, O>([x[2 * i], x[2 * i + 1]], rbits[i])
+        }))
+    }
+
+    /// Computes the absolute value of each element. A NaN input yields an unspecified NaN.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
+    #[inline(always)]
+    pub fn abs(self) -> Self {
+        self.abs_with::<{ Denormals::Preserve }>()
+    }
+
+    /// Computes the absolute value of each element, optionally flushing subnormal inputs and
+    /// results to sign-preserving zero. A NaN input yields an unspecified NaN.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
+    #[inline(always)]
+    pub fn abs_with<const D: Denormals>(self) -> Self {
+        self.map_pairs(|p| p.pair_abs_with::<D>())
+    }
+
+    /// Adds element-wise with explicit modifiers; rounds to nearest, ties to even.
+    ///
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
+    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
+    /// optionally clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-add>
+    #[inline(always)]
+    pub fn add_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
+        const {
+            assert!(
+                matches!(D, Denormals::Preserve) || matches!(S, Saturation::ClampToUnit),
+                "FlushToZero is only supported together with ClampToUnit saturation"
+            );
+        }
+        self.zip_pairs(rhs, |a, b| a.pair_add_with::<D, S>(b))
+    }
+
+    /// Subtracts element-wise with explicit modifiers; rounds to nearest, ties to even.
+    ///
+    /// Implemented as `self + (-rhs)`; see [`add_with`](Self::add_with) for the modifiers.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-sub>
+    #[inline(always)]
+    pub fn sub_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
+        self.add_with::<D, S>(-rhs)
+    }
+
+    /// Multiplies element-wise with explicit modifiers; rounds to nearest, ties to even.
+    ///
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero; the
+    /// underlying intrinsics only support this together with [`Saturation::ClampToUnit`]. `S`
+    /// optionally clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-mul>
+    #[inline(always)]
+    pub fn mul_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
+        const {
+            assert!(
+                matches!(D, Denormals::Preserve) || matches!(S, Saturation::ClampToUnit),
+                "FlushToZero is only supported together with ClampToUnit saturation"
+            );
+        }
+        self.zip_pairs(rhs, |a, b| a.pair_mul_with::<D, S>(b))
+    }
+
+    /// Element-wise fused multiply-add: computes `self * b + c` with a single rounding (to
+    /// nearest, ties to even).
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
+    #[inline(always)]
+    pub fn mul_add(self, b: Self, c: Self) -> Self {
+        self.mul_add_with::<{ Denormals::Preserve }, { Saturation::None }, { Relu::Disabled }>(b, c)
+    }
+
+    /// Element-wise fused multiply-add with explicit modifiers.
+    ///
+    /// `D` selects whether subnormal inputs and results are flushed to sign-preserving zero. `S`
+    /// clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`), and `R` clamps negative
+    /// results to zero (NaN results become canonical NaN); they cannot be combined.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
+    #[inline(always)]
+    pub fn mul_add_with<const D: Denormals, const S: Saturation, const R: Relu>(
+        self,
+        b: Self,
+        c: Self,
+    ) -> Self {
+        const {
+            assert!(
+                matches!(S, Saturation::None) || matches!(R, Relu::Disabled),
+                "ClampToUnit saturation and Relu cannot be combined"
+            );
+        }
+        let (a, b, c) = (self.to_x2s(), b.to_x2s(), c.to_x2s());
+        Self::from_x2s(array_from_fn(|i| {
+            a[i].pair_mul_add_with::<D, S, R>(b[i], c[i])
+        }))
+    }
+
+    /// Element-wise fused multiply-add with the out-of-bounds (OOB) modifier.
+    ///
+    /// Each result is forced to `+0.0` if either operand element is an [OOB-NaN], the special NaN
+    /// produced by out-of-bounds elements of tensor accesses in the `OOB-NaN` fill mode. The test
+    /// is performed independently for each element. `R` optionally clamps negative results to
+    /// zero.
+    ///
+    /// Requires `sm_90`.
+    ///
+    /// [OOB-NaN]: https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-tiled-mode-oob-access
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
+    #[cfg(target_feature = "sm_90")]
+    #[inline(always)]
+    pub fn mul_add_oob<const R: Relu>(self, b: Self, c: Self) -> Self {
+        let (a, b, c) = (self.to_x2s(), b.to_x2s(), c.to_x2s());
+        Self::from_x2s(array_from_fn(|i| a[i].pair_mul_add_oob::<R>(b[i], c[i])))
+    }
+
+    /// Computes `2^x` of each element, approximately (`ex2.approx.f16x2`).
+    ///
+    /// The maximum relative error of each element is 2^-9.9 (as for `ex2.approx.f16`). Subnormal
+    /// inputs are supported. `-inf` gives `+0.0` and `+inf` gives `+inf`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-ex2>
+    #[inline(always)]
+    pub fn exp2_approx(self) -> Self {
+        self.map_pairs(|p| p.pair_exp2_approx())
+    }
+
+    /// Computes the hyperbolic tangent of each element, approximately (`tanh.approx.f16x2`).
+    ///
+    /// The maximum absolute error of each element is 2^-10.987 (as for `tanh.approx.f16`).
+    /// Subnormal inputs are supported. `-inf` gives `-1.0`, `+inf` gives `+1.0`, and zeros are
+    /// preserved including their sign.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-tanh>
+    #[inline(always)]
+    pub fn tanh_approx(self) -> Self {
+        self.map_pairs(|p| p.pair_tanh_approx())
+    }
+
+    /// Returns the element-wise minimum. If exactly one input element is NaN, the other is
+    /// returned. `-0.0` is treated as less than `+0.0`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
+    #[inline(always)]
+    pub fn min(self, other: Self) -> Self {
+        self.min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Disabled }>(
+            other,
+        )
+    }
+
+    /// Returns the element-wise maximum. If exactly one input element is NaN, the other is
+    /// returned. `+0.0` is treated as greater than `-0.0`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
+    #[inline(always)]
+    pub fn max(self, other: Self) -> Self {
+        self.max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Disabled }>(
+            other,
+        )
+    }
+
+    /// Returns the element-wise minimum with explicit modifiers.
+    ///
+    /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal inputs and results
+    /// are flushed to sign-preserving zero. `NAN` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether each result has the minimum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
+    #[inline(always)]
+    pub fn min_with<const D: Denormals, const NAN: NanHandling, const X: XorSignAbs>(
+        self,
+        other: Self,
+    ) -> Self {
+        const {
+            assert!(
+                matches!(X, XorSignAbs::Disabled) || cfg!(target_feature = "sm_86"),
+                "XorSignAbs requires sm_86"
+            );
+        }
+        self.zip_pairs(other, |a, b| a.pair_min_with::<D, NAN, X>(b))
+    }
+
+    /// Returns the element-wise maximum with explicit modifiers.
+    ///
+    /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal inputs and results
+    /// are flushed to sign-preserving zero. `NAN` selects the NaN handling: [`NanHandling::Ignore`]
+    /// returns the other input if exactly one is NaN, [`NanHandling::Propagate`] yields a
+    /// canonical NaN if either input is NaN. `X` selects whether each result has the maximum
+    /// absolute value of the inputs and the XOR of their signs (skipped if the result is NaN);
+    /// this requires `sm_86`.
+    ///
+    /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
+    #[inline(always)]
+    pub fn max_with<const D: Denormals, const NAN: NanHandling, const X: XorSignAbs>(
+        self,
+        other: Self,
+    ) -> Self {
+        const {
+            assert!(
+                matches!(X, XorSignAbs::Disabled) || cfg!(target_feature = "sm_86"),
+                "XorSignAbs requires sm_86"
+            );
+        }
+        self.zip_pairs(other, |a, b| a.pair_max_with::<D, NAN, X>(b))
+    }
 
     /// Returns the minimum element. NaN elements are ignored; the result is NaN only if all
     /// elements are NaN. `-0.0` is treated as less than `+0.0`. See
     /// [`reduce_min_with`](Self::reduce_min_with).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-    #[inline]
+    #[inline(always)]
     pub fn reduce_min(self) -> f16 {
         self.reduce_min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
     }
@@ -925,7 +991,7 @@ impl f16x2 {
     /// [`reduce_max_with`](Self::reduce_max_with).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-    #[inline]
+    #[inline(always)]
     pub fn reduce_max(self) -> f16 {
         self.reduce_max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
     }
@@ -933,7 +999,7 @@ impl f16x2 {
     /// Returns the minimum element with explicit modifiers.
     ///
     /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal elements and results
-    /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
+    /// are flushed to sign-preserving zero. `NAN` selects the NaN handling: [`NanHandling::Ignore`]
     /// ignores NaN elements (the result is NaN only if all elements are NaN),
     /// [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
     ///
@@ -941,16 +1007,27 @@ impl f16x2 {
     /// until a single pair remains.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-    #[inline]
-    pub fn reduce_min_with<const D: Denormals, const N: NanHandling>(self) -> f16 {
-        self.lo()
-            .min_with::<D, N, { XorSignAbs::Disabled }>(self.hi())
+    #[inline(always)]
+    pub fn reduce_min_with<const D: Denormals, const NAN: NanHandling>(self) -> f16 {
+        let mut acc = self.to_x2s();
+        let mut n = acc.len();
+        #[rustc_unroll(full)]
+        while n > 1 {
+            n /= 2;
+            #[rustc_unroll(full)]
+            for i in 0..n {
+                acc[i] = acc[i].pair_min_with::<D, NAN, { XorSignAbs::Disabled }>(acc[i + n]);
+            }
+        }
+        acc[0]
+            .lo()
+            .min_with::<D, NAN, { XorSignAbs::Disabled }>(acc[0].hi())
     }
 
     /// Returns the maximum element with explicit modifiers.
     ///
     /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal elements and
-    /// results are flushed to sign-preserving zero. `N` selects the NaN handling:
+    /// results are flushed to sign-preserving zero. `NAN` selects the NaN handling:
     /// [`NanHandling::Ignore`] ignores NaN elements (the result is NaN only if all elements are
     /// NaN), [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
     ///
@@ -958,537 +1035,68 @@ impl f16x2 {
     /// until a single pair remains.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-    #[inline]
-    pub fn reduce_max_with<const D: Denormals, const N: NanHandling>(self) -> f16 {
-        self.lo()
-            .max_with::<D, N, { XorSignAbs::Disabled }>(self.hi())
+    #[inline(always)]
+    pub fn reduce_max_with<const D: Denormals, const NAN: NanHandling>(self) -> f16 {
+        let mut acc = self.to_x2s();
+        let mut n = acc.len();
+        #[rustc_unroll(full)]
+        while n > 1 {
+            n /= 2;
+            #[rustc_unroll(full)]
+            for i in 0..n {
+                acc[i] = acc[i].pair_max_with::<D, NAN, { XorSignAbs::Disabled }>(acc[i + n]);
+            }
+        }
+        acc[0]
+            .lo()
+            .max_with::<D, NAN, { XorSignAbs::Disabled }>(acc[0].hi())
     }
 }
 
-impl Add for f16x2 {
+impl<const N: usize> Add for f16xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     type Output = Self;
 
-    #[inline]
+    #[inline(always)]
     fn add(self, rhs: Self) -> Self {
         self.add_with::<{ Denormals::Preserve }, { Saturation::None }>(rhs)
     }
 }
 
-impl Sub for f16x2 {
+impl<const N: usize> Sub for f16xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     type Output = Self;
 
-    #[inline]
+    #[inline(always)]
     fn sub(self, rhs: Self) -> Self {
-        Self::from_core(unsafe { nv::sub_f16x2(self.to_core(), rhs.to_core()) })
+        self.zip_pairs(rhs, |a, b| a.pair_sub(b))
     }
 }
 
-impl Mul for f16x2 {
+impl<const N: usize> Mul for f16xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     type Output = Self;
 
-    #[inline]
+    #[inline(always)]
     fn mul(self, rhs: Self) -> Self {
         self.mul_with::<{ Denormals::Preserve }, { Saturation::None }>(rhs)
     }
 }
 
-impl Neg for f16x2 {
+impl<const N: usize> Neg for f16xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     type Output = Self;
 
-    #[inline]
+    #[inline(always)]
     fn neg(self) -> Self {
-        Self::from_core(unsafe { nv::neg_f16x2(self.to_core()) })
+        self.map_pairs(|p| p.pair_neg())
     }
 }
-
-impl AddAssign for f16x2 {
-    #[inline]
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
-}
-
-impl SubAssign for f16x2 {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Self) {
-        *self = *self - rhs;
-    }
-}
-
-impl MulAssign for f16x2 {
-    #[inline]
-    fn mul_assign(&mut self, rhs: Self) {
-        *self = *self * rhs;
-    }
-}
-
-/// Implements the arithmetic of a wide (`N >= 4`) `f16` vector pair-wise in terms of [`f16x2`].
-macro_rules! f16_wide {
-    ($ty:ident, n: $n:literal, pairs: $pairs:literal) => {
-        impl $ty {
-            #[doc = concat!("Converts ", stringify!($n), " `f32` values to `f16` using stochastic rounding.")]
-            ///
-            /// Each pair of elements is converted with [`f16x2::from_f32_stochastic`]; `rbits[i]`
-            /// supplies the random bits of the pair formed by elements `2 * i` and `2 * i + 1`,
-            /// with the 13 least significant bits of its upper half used for the odd element
-            /// and those of its lower half for the even element. See there for the meaning of
-            /// the parameters.
-            ///
-            /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
-            #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
-            #[inline]
-            pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
-                x: Simd<f32, $n>,
-                rbits: Simd<u32, { $n / 2 }>,
-            ) -> Self {
-                let (x, rbits) = (x.to_array(), rbits.to_array());
-                Self(crate::data_types::array_from_fn(|i| {
-                    f16x2::from_f32_stochastic::<R, O>(
-                        Simd::from_array([x[2 * i], x[2 * i + 1]]),
-                        rbits[i],
-                    )
-                }))
-            }
-
-            /// Computes the absolute value of each element. A NaN input yields an unspecified
-            /// NaN.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
-            #[inline]
-            pub fn abs(self) -> Self {
-                self.abs_with::<{ Denormals::Preserve }>()
-            }
-
-            /// Computes the absolute value of each element, optionally flushing subnormal inputs
-            /// and results to sign-preserving zero. A NaN input yields an unspecified NaN.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-abs>
-            #[inline]
-            pub fn abs_with<const D: Denormals>(self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| self.0[i].abs_with::<D>()))
-            }
-
-            /// Adds element-wise with explicit modifiers; rounds to nearest, ties to even.
-            ///
-            /// `D` selects whether subnormal inputs and results are flushed to sign-preserving
-            /// zero; the underlying intrinsics only support this together with
-            /// [`Saturation::ClampToUnit`]. `S` optionally clamps each result to `[0.0, 1.0]`
-            /// (NaN results become `+0.0`).
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-add>
-            #[inline]
-            pub fn add_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
-                const {
-                    assert!(
-                        matches!(D, Denormals::Preserve) || matches!(S, Saturation::ClampToUnit),
-                        "FlushToZero is only supported together with ClampToUnit saturation"
-                    );
-                }
-                Self(crate::data_types::array_from_fn(|i| self.0[i].add_with::<D, S>(rhs.0[i])))
-            }
-
-            /// Subtracts element-wise with explicit modifiers; rounds to nearest, ties to even.
-            ///
-            /// Implemented as `self + (-rhs)`; see [`add_with`](Self::add_with) for the
-            /// modifiers.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-sub>
-            #[inline]
-            pub fn sub_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
-                self.add_with::<D, S>(-rhs)
-            }
-
-            /// Multiplies element-wise with explicit modifiers; rounds to nearest, ties to even.
-            ///
-            /// `D` selects whether subnormal inputs and results are flushed to sign-preserving
-            /// zero; the underlying intrinsics only support this together with
-            /// [`Saturation::ClampToUnit`]. `S` optionally clamps each result to `[0.0, 1.0]`
-            /// (NaN results become `+0.0`).
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-mul>
-            #[inline]
-            pub fn mul_with<const D: Denormals, const S: Saturation>(self, rhs: Self) -> Self {
-                const {
-                    assert!(
-                        matches!(D, Denormals::Preserve) || matches!(S, Saturation::ClampToUnit),
-                        "FlushToZero is only supported together with ClampToUnit saturation"
-                    );
-                }
-                Self(crate::data_types::array_from_fn(|i| self.0[i].mul_with::<D, S>(rhs.0[i])))
-            }
-
-            /// Element-wise fused multiply-add: computes `self * b + c` with a single rounding
-            /// (to nearest, ties to even).
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
-            #[inline]
-            pub fn mul_add(self, b: Self, c: Self) -> Self {
-                self.mul_add_with::<{ Denormals::Preserve }, { Saturation::None }, { Relu::Disabled }>(
-                    b, c,
-                )
-            }
-
-            /// Element-wise fused multiply-add with explicit modifiers.
-            ///
-            /// `D` selects whether subnormal inputs and results are flushed to sign-preserving
-            /// zero. `S` clamps each result to `[0.0, 1.0]` (NaN results become `+0.0`), and `R`
-            /// clamps negative results to zero (NaN results become canonical NaN); they cannot be
-            /// combined.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
-            #[inline]
-            pub fn mul_add_with<const D: Denormals, const S: Saturation, const R: Relu>(
-                self,
-                b: Self,
-                c: Self,
-            ) -> Self {
-                const {
-                    assert!(
-                        matches!(S, Saturation::None) || matches!(R, Relu::Disabled),
-                        "ClampToUnit saturation and Relu cannot be combined"
-                    );
-                }
-                Self(crate::data_types::array_from_fn(|i| {
-                    self.0[i].mul_add_with::<D, S, R>(b.0[i], c.0[i])
-                }))
-            }
-
-            /// Element-wise fused multiply-add with the out-of-bounds (OOB) modifier.
-            ///
-            /// Each result is forced to `+0.0` if either operand element is an [OOB-NaN], the
-            /// special NaN produced by out-of-bounds elements of tensor accesses in the `OOB-NaN`
-            /// fill mode. The test is performed independently for each element. `R` optionally
-            /// clamps negative results to zero.
-            ///
-            /// Requires `sm_90`.
-            ///
-            /// [OOB-NaN]: https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-tiled-mode-oob-access
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
-            #[cfg(target_feature = "sm_90")]
-            #[inline]
-            pub fn mul_add_oob<const R: Relu>(self, b: Self, c: Self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| {
-                    self.0[i].mul_add_oob::<R>(b.0[i], c.0[i])
-                }))
-            }
-
-            /// Computes `2^x` of each element, approximately (`ex2.approx.f16x2`).
-            ///
-            /// The maximum relative error of each element is 2^-9.9 (as for `ex2.approx.f16`).
-            /// Subnormal inputs are supported. `-inf` gives `+0.0` and `+inf` gives `+inf`.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-ex2>
-            #[inline]
-            pub fn exp2_approx(self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| self.0[i].exp2_approx()))
-            }
-
-            /// Computes the hyperbolic tangent of each element, approximately
-            /// (`tanh.approx.f16x2`).
-            ///
-            /// The maximum absolute error of each element is 2^-10.987. Subnormal inputs are
-            /// supported. `-inf` gives `-1.0`, `+inf` gives `+1.0`, and zeros are preserved
-            /// including their sign.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-tanh>
-            #[inline]
-            pub fn tanh_approx(self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| self.0[i].tanh_approx()))
-            }
-
-            /// Returns the element-wise minimum. If exactly one input element is NaN, the other
-            /// is returned. `-0.0` is treated as less than `+0.0`.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-            #[inline]
-            pub fn min(self, other: Self) -> Self {
-                self.min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Disabled }>(
-                    other,
-                )
-            }
-
-            /// Returns the element-wise maximum. If exactly one input element is NaN, the other
-            /// is returned. `+0.0` is treated as greater than `-0.0`.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-            #[inline]
-            pub fn max(self, other: Self) -> Self {
-                self.max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Disabled }>(
-                    other,
-                )
-            }
-
-            /// Returns the element-wise minimum with explicit modifiers.
-            ///
-            /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal inputs and
-            /// results are flushed to sign-preserving zero. `N` selects the NaN handling:
-            /// [`NanHandling::Ignore`] returns the other input if exactly one is NaN,
-            /// [`NanHandling::Propagate`] yields a canonical NaN if either input is NaN. `X`
-            /// selects whether each result has the minimum absolute value of the inputs and the
-            /// XOR of their signs (skipped if the result is NaN); this requires `sm_86`.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-            #[inline]
-            pub fn min_with<const D: Denormals, const N: NanHandling, const X: XorSignAbs>(
-                self,
-                other: Self,
-            ) -> Self {
-                const {
-                    assert!(
-                        matches!(X, XorSignAbs::Disabled) || cfg!(target_feature = "sm_86"),
-                        "XorSignAbs requires sm_86"
-                    );
-                }
-                Self(crate::data_types::array_from_fn(|i| {
-                    self.0[i].min_with::<D, N, X>(other.0[i])
-                }))
-            }
-
-            /// Returns the element-wise maximum with explicit modifiers.
-            ///
-            /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal inputs and
-            /// results are flushed to sign-preserving zero. `N` selects the NaN handling:
-            /// [`NanHandling::Ignore`] returns the other input if exactly one is NaN,
-            /// [`NanHandling::Propagate`] yields a canonical NaN if either input is NaN. `X`
-            /// selects whether each result has the maximum absolute value of the inputs and the
-            /// XOR of their signs (skipped if the result is NaN); this requires `sm_86`.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-            #[inline]
-            pub fn max_with<const D: Denormals, const N: NanHandling, const X: XorSignAbs>(
-                self,
-                other: Self,
-            ) -> Self {
-                const {
-                    assert!(
-                        matches!(X, XorSignAbs::Disabled) || cfg!(target_feature = "sm_86"),
-                        "XorSignAbs requires sm_86"
-                    );
-                }
-                Self(crate::data_types::array_from_fn(|i| {
-                    self.0[i].max_with::<D, N, X>(other.0[i])
-                }))
-            }
-
-            /// Returns the minimum element. NaN elements are ignored; the result is NaN only if all
-            /// elements are NaN. `-0.0` is treated as less than `+0.0`. See
-            /// [`reduce_min_with`](Self::reduce_min_with).
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-            #[inline]
-            pub fn reduce_min(self) -> f16 {
-                self.reduce_min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
-            }
-
-            /// Returns the maximum element. NaN elements are ignored; the result is NaN only if all
-            /// elements are NaN. `+0.0` is treated as greater than `-0.0`. See
-            /// [`reduce_max_with`](Self::reduce_max_with).
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-            #[inline]
-            pub fn reduce_max(self) -> f16 {
-                self.reduce_max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
-            }
-
-            /// Returns the minimum element with explicit modifiers.
-            ///
-            /// `-0.0` is treated as less than `+0.0`. `D` selects whether subnormal elements and results
-            /// are flushed to sign-preserving zero. `N` selects the NaN handling: [`NanHandling::Ignore`]
-            /// ignores NaN elements (the result is NaN only if all elements are NaN),
-            /// [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
-            ///
-            /// The elements are combined with `min` instructions in a tree, using `min.f16x2` on pairs
-            /// until a single pair remains.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
-            #[inline]
-            pub fn reduce_min_with<const D: Denormals, const N: NanHandling>(self) -> f16 {
-                self.lo()
-                    .min_with::<D, N, { XorSignAbs::Disabled }>(self.hi())
-                    .reduce_min_with::<D, N>()
-            }
-
-            /// Returns the maximum element with explicit modifiers.
-            ///
-            /// `+0.0` is treated as greater than `-0.0`. `D` selects whether subnormal elements and
-            /// results are flushed to sign-preserving zero. `N` selects the NaN handling:
-            /// [`NanHandling::Ignore`] ignores NaN elements (the result is NaN only if all elements are
-            /// NaN), [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
-            ///
-            /// The elements are combined with `max` instructions in a tree, using `max.f16x2` on pairs
-            /// until a single pair remains.
-            ///
-            /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
-            #[inline]
-            pub fn reduce_max_with<const D: Denormals, const N: NanHandling>(self) -> f16 {
-                self.lo()
-                    .max_with::<D, N, { XorSignAbs::Disabled }>(self.hi())
-                    .reduce_max_with::<D, N>()
-            }
-        }
-
-        impl Add for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn add(self, rhs: Self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| self.0[i] + rhs.0[i]))
-            }
-        }
-
-        impl Sub for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn sub(self, rhs: Self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| self.0[i] - rhs.0[i]))
-            }
-        }
-
-        impl Mul for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn mul(self, rhs: Self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| self.0[i] * rhs.0[i]))
-            }
-        }
-
-        impl Neg for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn neg(self) -> Self {
-                Self(crate::data_types::array_from_fn(|i| -self.0[i]))
-            }
-        }
-
-        impl AddAssign for $ty {
-            #[inline]
-            fn add_assign(&mut self, rhs: Self) {
-                *self = *self + rhs;
-            }
-        }
-
-        impl SubAssign for $ty {
-            #[inline]
-            fn sub_assign(&mut self, rhs: Self) {
-                *self = *self - rhs;
-            }
-        }
-
-        impl MulAssign for $ty {
-            #[inline]
-            fn mul_assign(&mut self, rhs: Self) {
-                *self = *self * rhs;
-            }
-        }
-    };
-}
-
-f16_wide!(f16x4, n: 4, pairs: 2);
-f16_wide!(f16x8, n: 8, pairs: 4);
-f16_wide!(f16x16, n: 16, pairs: 8);
-f16_wide!(f16x32, n: 32, pairs: 16);
-
-/// Implements the scalar-broadcast operators and the conversion to `Simd<f32, N>` of a vector.
-macro_rules! f16_broadcast {
-    ($ty:ident, n: $n:literal) => {
-        impl Add<f16> for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn add(self, rhs: f16) -> Self {
-                self + Self::splat(rhs)
-            }
-        }
-
-        impl Sub<f16> for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn sub(self, rhs: f16) -> Self {
-                self - Self::splat(rhs)
-            }
-        }
-
-        impl Mul<f16> for $ty {
-            type Output = Self;
-
-            #[inline]
-            fn mul(self, rhs: f16) -> Self {
-                self * Self::splat(rhs)
-            }
-        }
-
-        impl Add<$ty> for f16 {
-            type Output = $ty;
-
-            #[inline]
-            fn add(self, rhs: $ty) -> $ty {
-                $ty::splat(self) + rhs
-            }
-        }
-
-        impl Sub<$ty> for f16 {
-            type Output = $ty;
-
-            #[inline]
-            fn sub(self, rhs: $ty) -> $ty {
-                $ty::splat(self) - rhs
-            }
-        }
-
-        impl Mul<$ty> for f16 {
-            type Output = $ty;
-
-            #[inline]
-            fn mul(self, rhs: $ty) -> $ty {
-                $ty::splat(self) * rhs
-            }
-        }
-
-        impl AddAssign<f16> for $ty {
-            #[inline]
-            fn add_assign(&mut self, rhs: f16) {
-                *self = *self + rhs;
-            }
-        }
-
-        impl SubAssign<f16> for $ty {
-            #[inline]
-            fn sub_assign(&mut self, rhs: f16) {
-                *self = *self - rhs;
-            }
-        }
-
-        impl MulAssign<f16> for $ty {
-            #[inline]
-            fn mul_assign(&mut self, rhs: f16) {
-                *self = *self * rhs;
-            }
-        }
-
-        impl From<$ty> for Simd<f32, $n> {
-            #[inline]
-            fn from(x: $ty) -> Self {
-                x.to_f32()
-            }
-        }
-    };
-}
-
-f16_broadcast!(f16x2, n: 2);
-f16_broadcast!(f16x4, n: 4);
-f16_broadcast!(f16x8, n: 8);
-f16_broadcast!(f16x16, n: 16);
-f16_broadcast!(f16x32, n: 32);
-
-half_reduce_sum!(f16x2, "f16", x2);
-half_reduce_sum!(f16x4, "f16", wide);
-half_reduce_sum!(f16x8, "f16", wide);
-half_reduce_sum!(f16x16, "f16", wide);
-half_reduce_sum!(f16x32, "f16", wide);

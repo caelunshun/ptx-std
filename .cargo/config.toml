@@ -1,10 +1,11 @@
 [target.nvptx64-nvidia-cuda]
-rustflags = ["-C", "target-feature=+ptx93,+sm_103a", "-C", "target-cpu=sm_103a"]
+rustflags = ["-C", "target-feature=+ptx93,+sm_103a", "-C", "target-cpu=sm_103a", "-Znext-solver"]
 rustdocflags = [
     "-C",
     "target-feature=+ptx93,+sm_103a",
     "-C",
     "target-cpu=sm_103a",
+    "-Znext-solver",
 ]
 
 [build]

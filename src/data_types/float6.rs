@@ -7,7 +7,7 @@
 //!
 //! In all packed types, element 0 occupies the least significant bits.
 
-use super::vector::{Specials, minifloat_to_f32, narrow_scalar, vector_types};
+use super::vector::{Specials, minifloat_to_f32, narrow_scalar, vector_element};
 
 // Only used by the conversions, which are gated on newer architectures.
 #[allow(unused_imports)]
@@ -43,21 +43,17 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: f6e2m3, pack: bytes,
+vector_element! {
+    elem: f6e2m3, pair: u16, packing: Bytes,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f6e2m3`](crate::f6e2m3) for the format. Each element is stored in the low 6 bits of a byte; the two most significant bits of each byte must be zero when the value is used as a conversion source.",
-    x2: f6e2m3x2(u16),
-    x4: f6e2m3x4(u32),
-    x8: f6e2m3x8(u64),
-    x16: f6e2m3x16(u128),
-    x32: f6e2m3x32([u128; 2]),
+    aliases: f6e2m3xN, f6e2m3x2, f6e2m3x4, f6e2m3x8, f6e2m3x16, f6e2m3x32,
 }
 
 narrow_cvt! {
     "FP6 E2M3",
     scalar: f6e2m3,
-    x2: f6e2m3x2(u16), x4: f6e2m3x4(u32), x8: f6e2m3x8, x16: f6e2m3x16, x32: f6e2m3x32,
+    x2: f6e2m3x2(u16), x4: f6e2m3x4(u32),
     basic: any(target_feature = "sm_100f", target_feature = "sm_101f", target_feature = "sm_110f", target_feature = "sm_120f"),
     from_f16: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),
     newer: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),
@@ -103,21 +99,17 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: f6e3m2, pack: bytes,
+vector_element! {
+    elem: f6e3m2, pair: u16, packing: Bytes,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f6e3m2`](crate::f6e3m2) for the format. Each element is stored in the low 6 bits of a byte; the two most significant bits of each byte must be zero when the value is used as a conversion source.",
-    x2: f6e3m2x2(u16),
-    x4: f6e3m2x4(u32),
-    x8: f6e3m2x8(u64),
-    x16: f6e3m2x16(u128),
-    x32: f6e3m2x32([u128; 2]),
+    aliases: f6e3m2xN, f6e3m2x2, f6e3m2x4, f6e3m2x8, f6e3m2x16, f6e3m2x32,
 }
 
 narrow_cvt! {
     "FP6 E3M2",
     scalar: f6e3m2,
-    x2: f6e3m2x2(u16), x4: f6e3m2x4(u32), x8: f6e3m2x8, x16: f6e3m2x16, x32: f6e3m2x32,
+    x2: f6e3m2x2(u16), x4: f6e3m2x4(u32),
     basic: any(target_feature = "sm_100f", target_feature = "sm_101f", target_feature = "sm_110f", target_feature = "sm_120f"),
     from_f16: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),
     newer: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),

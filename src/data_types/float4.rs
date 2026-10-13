@@ -5,7 +5,7 @@
 //! In all packed types, element 0 occupies the least significant bits; two elements share a byte,
 //! with element 0 in the low nibble.
 
-use super::vector::{Specials, minifloat_to_f32, narrow_scalar, vector_types};
+use super::vector::{Specials, minifloat_to_f32, narrow_scalar, vector_element};
 
 // Only used by the conversions, which are gated on newer architectures.
 #[allow(unused_imports)]
@@ -42,21 +42,17 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: f4e2m1, pack: nibbles,
+vector_element! {
+    elem: f4e2m1, pair: u8, packing: Nibbles,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f4e2m1`](crate::f4e2m1) for the format.",
-    x2: f4e2m1x2(u8),
-    x4: f4e2m1x4(u16),
-    x8: f4e2m1x8(u32),
-    x16: f4e2m1x16(u64),
-    x32: f4e2m1x32(u128),
+    aliases: f4e2m1xN, f4e2m1x2, f4e2m1x4, f4e2m1x8, f4e2m1x16, f4e2m1x32,
 }
 
 narrow_cvt! {
     "FP4 E2M1",
     scalar: f4e2m1,
-    x2: f4e2m1x2(u8), x4: f4e2m1x4(u16), x8: f4e2m1x8, x16: f4e2m1x16, x32: f4e2m1x32,
+    x2: f4e2m1x2(u8), x4: f4e2m1x4(u16),
     basic: any(target_feature = "sm_100f", target_feature = "sm_101f", target_feature = "sm_110f", target_feature = "sm_120f"),
     from_f16: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),
     newer: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),

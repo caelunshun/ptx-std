@@ -23,10 +23,10 @@
 macro_rules! const_bool {
     ($name:ident = $cond:expr => $body:expr) => {
         if const { $cond } {
-            const $name: bool = true;
+            const $name: bool = core::gca!(true);
             $body
         } else {
-            const $name: bool = false;
+            const $name: bool = core::gca!(false);
             $body
         }
     };
@@ -44,7 +44,7 @@ macro_rules! const_bool {
 macro_rules! const_map {
     ($scrut:expr => $name:ident: $ty:ty { $($pat:pat => $val:expr),+ $(,)? } in $body:expr) => {
         $(if const { matches!($scrut, $pat) } {
-            const $name: $ty = $val;
+            const $name: $ty = core::gca!($val);
             $body
         } else)+ {
             unreachable!()

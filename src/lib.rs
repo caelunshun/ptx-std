@@ -15,7 +15,9 @@
     adt_const_params,
     f16,
     loop_hints,
-    portable_simd
+    portable_simd,
+    gca_min_const_items,
+    gca_macroless_args
 )]
 #![allow(incomplete_features)]
 #![no_std]

@@ -4,7 +4,7 @@
 // Only used by the conversions, which are gated on newer architectures.
 #[allow(unused_imports)]
 use super::narrow::s2f6_cvt;
-use super::vector::{narrow_scalar, vector_types};
+use super::vector::{narrow_scalar, vector_element};
 
 narrow_scalar! {
     /// An `s2f6` value.
@@ -36,20 +36,16 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: s2f6, pack: bytes,
+vector_element! {
+    elem: s2f6, pair: u16, packing: Bytes,
     consts: [ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE],
     note: "See [`s2f6`](crate::s2f6) for the format.",
-    x2: s2f6x2(u16),
-    x4: s2f6x4(u32),
-    x8: s2f6x8(u64),
-    x16: s2f6x16(u128),
-    x32: s2f6x32([u128; 2]),
+    aliases: s2f6xN, s2f6x2, s2f6x4, s2f6x8, s2f6x16, s2f6x32,
 }
 
 s2f6_cvt! {
     scalar: s2f6,
-    x2: s2f6x2, x4: s2f6x4, x8: s2f6x8, x16: s2f6x16, x32: s2f6x32,
+    x2: s2f6x2,
     cfg: any(
         target_feature = "sm_100a",
         target_feature = "sm_103a",

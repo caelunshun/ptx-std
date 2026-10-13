@@ -145,6 +145,7 @@ macro_rules! stochastic_kernel {
             |x: *const $f32, rbits: *const $rbits, out: *mut [$ty; 2]| {
                 let x = *x;
                 let rbits = *rbits;
+                let rbits = core::array::from_fn(|i| rbits[i]);
                 *out = [
                     <$ty>::from_f32_stochastic::<{ Relu::Disabled }>(x, rbits),
                     <$ty>::from_f32_stochastic::<{ Relu::Enabled }>(x, rbits),
@@ -176,7 +177,7 @@ macro_rules! narrow_format {
             basic: $basic, from_f16: $from_f16, newer: $newer);
         cvt_kernels!($x32, f32: Simd<f32, 32>, f16: f16x32, bf16: bf16x32, scales: f8e8m0x32,
             basic: $basic, from_f16: $from_f16, newer: $newer);
-        stochastic_kernel!($x4, f32: Simd<f32, 4>, rbits: u32, stochastic: $stochastic);
+        stochastic_kernel!($x4, f32: Simd<f32, 4>, rbits: Simd<u32, 1>, stochastic: $stochastic);
         stochastic_kernel!($x8, f32: Simd<f32, 8>, rbits: Simd<u32, 2>, stochastic: $stochastic);
         stochastic_kernel!($x16, f32: Simd<f32, 16>, rbits: Simd<u32, 4>, stochastic: $stochastic);
         stochastic_kernel!($x32, f32: Simd<f32, 32>, rbits: Simd<u32, 8>, stochastic: $stochastic);

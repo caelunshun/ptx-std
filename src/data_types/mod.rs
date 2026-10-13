@@ -23,6 +23,7 @@ pub use float8::*;
 pub use float16::*;
 pub use int_ext::*;
 pub use s2f6_format::*;
+pub use vector::*;
 
 use core::mem::MaybeUninit;
 

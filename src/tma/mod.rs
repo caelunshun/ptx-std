@@ -42,12 +42,12 @@ macro_rules! with_cache_policy {
     ($policy:expr, $hint:ident, $bits:ident => $body:expr) => {
         match $policy {
             Some(policy) => {
-                const $hint: bool = true;
+                const $hint: bool = core::gca!(true);
                 let $bits = policy.to_bits();
                 $body
             }
             None => {
-                const $hint: bool = false;
+                const $hint: bool = core::gca!(false);
                 let $bits = 0u64;
                 $body
             }
@@ -60,12 +60,12 @@ macro_rules! with_multicast {
     ($mask:expr, $flag:ident, $bits:ident => $body:expr) => {
         match $mask {
             Some(mask) => {
-                const $flag: bool = true;
+                const $flag: bool = core::gca!(true);
                 let $bits = mask.to_bits();
                 $body
             }
             None => {
-                const $flag: bool = false;
+                const $flag: bool = core::gca!(false);
                 let $bits = 0u16;
                 $body
             }

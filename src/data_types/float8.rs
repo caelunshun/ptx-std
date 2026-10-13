@@ -4,7 +4,7 @@
 //!
 //! In all packed types, element 0 occupies the least significant bits.
 
-use super::vector::{Specials, minifloat_to_f32, narrow_scalar, vector_types};
+use super::vector::{Specials, minifloat_to_f32, narrow_scalar, vector_element};
 
 // Only used by the conversions, which are gated on newer architectures.
 #[allow(unused_imports)]
@@ -41,21 +41,17 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: f8e4m3, pack: bytes,
+vector_element! {
+    elem: f8e4m3, pair: u16, packing: Bytes,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, NAN, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f8e4m3`](crate::f8e4m3) for the format.",
-    x2: f8e4m3x2(u16),
-    x4: f8e4m3x4(u32),
-    x8: f8e4m3x8(u64),
-    x16: f8e4m3x16(u128),
-    x32: f8e4m3x32([u128; 2]),
+    aliases: f8e4m3xN, f8e4m3x2, f8e4m3x4, f8e4m3x8, f8e4m3x16, f8e4m3x32,
 }
 
 narrow_cvt! {
     "FP8 E4M3",
     scalar: f8e4m3,
-    x2: f8e4m3x2(u16), x4: f8e4m3x4(u32), x8: f8e4m3x8, x16: f8e4m3x16, x32: f8e4m3x32,
+    x2: f8e4m3x2(u16), x4: f8e4m3x4(u32),
     basic: target_feature = "sm_89",
     from_f16: target_feature = "sm_89",
     newer: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),
@@ -107,24 +103,20 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: f8e5m2, pack: bytes,
+vector_element! {
+    elem: f8e5m2, pair: u16, packing: Bytes,
     consts: [
         ZERO, NEG_ZERO, ONE, NEG_ONE, INFINITY, NEG_INFINITY, NAN, MAX, MIN, MIN_POSITIVE,
         MIN_POSITIVE_SUBNORMAL
     ],
     note: "See [`f8e5m2`](crate::f8e5m2) for the format.",
-    x2: f8e5m2x2(u16),
-    x4: f8e5m2x4(u32),
-    x8: f8e5m2x8(u64),
-    x16: f8e5m2x16(u128),
-    x32: f8e5m2x32([u128; 2]),
+    aliases: f8e5m2xN, f8e5m2x2, f8e5m2x4, f8e5m2x8, f8e5m2x16, f8e5m2x32,
 }
 
 narrow_cvt! {
     "FP8 E5M2",
     scalar: f8e5m2,
-    x2: f8e5m2x2(u16), x4: f8e5m2x4(u32), x8: f8e5m2x8, x16: f8e5m2x16, x32: f8e5m2x32,
+    x2: f8e5m2x2(u16), x4: f8e5m2x4(u32),
     basic: target_feature = "sm_89",
     from_f16: target_feature = "sm_89",
     newer: any(target_feature = "sm_100f", target_feature = "sm_110f", target_feature = "sm_120f"),
@@ -170,20 +162,16 @@ narrow_scalar! {
     }
 }
 
-vector_types! {
-    elem: f8e8m0, pack: bytes,
+vector_element! {
+    elem: f8e8m0, pair: u16, packing: Bytes,
     consts: [ONE, NAN, MAX, MIN],
     note: "See [`f8e8m0`](crate::f8e8m0) for the format.",
-    x2: f8e8m0x2(u16),
-    x4: f8e8m0x4(u32),
-    x8: f8e8m0x8(u64),
-    x16: f8e8m0x16(u128),
-    x32: f8e8m0x32([u128; 2]),
+    aliases: f8e8m0xN, f8e8m0x2, f8e8m0x4, f8e8m0x8, f8e8m0x16, f8e8m0x32,
 }
 
 ue8m0_cvt! {
     scalar: f8e8m0,
-    x2: f8e8m0x2, x4: f8e8m0x4, x8: f8e8m0x8, x16: f8e8m0x16, x32: f8e8m0x32,
+    x2: f8e8m0x2,
     cfg: any(
         target_feature = "sm_100f",
         target_feature = "sm_101f",
