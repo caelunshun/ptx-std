@@ -155,10 +155,11 @@ pub struct WTraversal {
     pub offset: u16,
 }
 
-/// Reduction operation applied by `tma_reduce_tile` and `tma_reduce_im2col` (`.redOp`).
+/// Reduction operation applied by `tma_reduce_tile`, `tma_reduce_im2col`, `bulk_reduce` and
+/// `bulk_reduce_to_cluster` (`.redOp`).
 ///
-/// The element type is given by the tensor map. Not every operation is supported for every
-/// element type:
+/// For the tensor reductions, the element type is given by the tensor map. Not every operation is
+/// supported for every element type (see `BulkReduceElement` for the non-tensor reductions):
 ///
 /// | Operation | Element types |
 /// |---|---|

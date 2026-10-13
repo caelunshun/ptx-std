@@ -20,3 +20,8 @@ crate-type = ["rlib"]
 name = "vector_ptxas"
 path = "examples/vector_ptxas/main.rs"
 crate-type = ["rlib"]
+
+[[example]]
+name = "tma_ptxas"
+path = "examples/tma_ptxas/main.rs"
+crate-type = ["rlib"]

@@ -267,7 +267,7 @@ pub trait RedAsyncReleaseAdd: sealed::RedAsyncRelease {}
 
 /// Converts the generic address `ptr` to an address in the state space `SPACE` (`cvta.to`).
 #[inline(always)]
-fn space_address<const SPACE: AtomicSpace, T>(ptr: *mut T) -> u64 {
+pub(crate) fn space_address<const SPACE: AtomicSpace, T>(ptr: *mut T) -> u64 {
     let ptr = ptr.expose_provenance() as u64;
     macro_rules! cvta {
         ($space:literal) => {{

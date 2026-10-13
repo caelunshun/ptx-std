@@ -153,6 +153,7 @@ impl PhaseParity {
 
     /// Returns the opposite parity.
     #[inline]
+    #[must_use]
     pub const fn flip(self) -> Self {
         match self {
             PhaseParity::Even => PhaseParity::Odd,
