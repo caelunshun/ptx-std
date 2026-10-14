@@ -1,6 +1,6 @@
 // --- LLM-generated --- //
-//! 4-bit floating-point format (`e2m1`), as a scalar and packed vectors of 2, 4, 8, 16 and
-//! 32 elements.
+//! 4-bit floating-point format (`e2m1`), as a scalar and packed vectors of 2, 4, 8, 16, 32
+//! and 64 elements.
 //!
 //! In all packed types, element 0 occupies the least significant bits; two elements share a byte,
 //! with element 0 in the low nibble.
@@ -46,7 +46,7 @@ vector_element! {
     elem: f4e2m1, pair: u8, packing: Nibbles,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f4e2m1`](crate::f4e2m1) for the format.",
-    aliases: f4e2m1xN, f4e2m1x2, f4e2m1x4, f4e2m1x8, f4e2m1x16, f4e2m1x32,
+    aliases: f4e2m1xN, f4e2m1x2, f4e2m1x4, f4e2m1x8, f4e2m1x16, f4e2m1x32, f4e2m1x64,
 }
 
 narrow_cvt! {

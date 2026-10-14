@@ -1,6 +1,6 @@
 // --- LLM-generated --- //
-//! 6-bit floating-point formats (`e2m3`, `e3m2`), as scalars and packed vectors of 2, 4, 8, 16 and
-//! 32 elements.
+//! 6-bit floating-point formats (`e2m3`, `e3m2`), as scalars and packed vectors of 2, 4, 8, 16, 32
+//! and 64 elements.
 //!
 //! Each 6-bit value is stored in the low 6 bits of a byte; the two most significant bits of every
 //! byte are zero.
@@ -47,7 +47,7 @@ vector_element! {
     elem: f6e2m3, pair: u16, packing: Bytes,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f6e2m3`](crate::f6e2m3) for the format. Each element is stored in the low 6 bits of a byte; the two most significant bits of each byte must be zero when the value is used as a conversion source.",
-    aliases: f6e2m3xN, f6e2m3x2, f6e2m3x4, f6e2m3x8, f6e2m3x16, f6e2m3x32,
+    aliases: f6e2m3xN, f6e2m3x2, f6e2m3x4, f6e2m3x8, f6e2m3x16, f6e2m3x32, f6e2m3x64,
 }
 
 narrow_cvt! {
@@ -103,7 +103,7 @@ vector_element! {
     elem: f6e3m2, pair: u16, packing: Bytes,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f6e3m2`](crate::f6e3m2) for the format. Each element is stored in the low 6 bits of a byte; the two most significant bits of each byte must be zero when the value is used as a conversion source.",
-    aliases: f6e3m2xN, f6e3m2x2, f6e3m2x4, f6e3m2x8, f6e3m2x16, f6e3m2x32,
+    aliases: f6e3m2xN, f6e3m2x2, f6e3m2x4, f6e3m2x8, f6e3m2x16, f6e3m2x32, f6e3m2x64,
 }
 
 narrow_cvt! {

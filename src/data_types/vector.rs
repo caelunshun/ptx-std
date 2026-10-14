@@ -1,8 +1,8 @@
 // --- LLM-generated --- //
 //! Shared implementation of the container API of the floating-point scalar and vector types.
 //!
-//! Every format has a scalar and vectors of 2, 4, 8, 16 and 32 elements, all aligned to their own
-//! size. Element 0 always occupies the least significant bits (the machine is little-endian, so
+//! Every format has a scalar and vectors of 2, 4, 8, 16, 32 and 64 elements, all aligned to their
+//! own size. Element 0 always occupies the least significant bits (the machine is little-endian, so
 //! it is also the first element in memory).
 //!
 //! All vectors of all formats are one type, [`Vector<E, N>`], where `E` implements
@@ -189,7 +189,8 @@ pub(crate) const unsafe fn cast_unchecked<A: Copy, B: Copy>(a: A) -> B {
 /// code generic over the length of a vector needs.
 pub struct VectorLen<const N: usize>;
 
-/// Implemented for [`VectorLen`] of `2`, `4`, `8`, `16` and `32`, the lengths of the vectors.
+/// Implemented for [`VectorLen`] of `2`, `4`, `8`, `16`, `32` and `64`, the lengths of the
+/// vectors.
 /// Sealed.
 ///
 /// Code that is generic over the length writes the bound `VectorLen<N>: SupportedVectorLen`, and
@@ -206,8 +207,8 @@ pub trait SupportedVectorLen: sealed::Sealed {
     type Half<E: VectorElement>: Copy + Pod;
 }
 
-/// Implemented for [`VectorLen`] of `4`, `8`, `16` and `32`, the lengths that are multiples of
-/// four, for the conversions that process four elements at a time. Sealed.
+/// Implemented for [`VectorLen`] of `4`, `8`, `16`, `32` and `64`, the lengths that are multiples
+/// of four, for the conversions that process four elements at a time. Sealed.
 pub trait QuadVectorLen: SupportedVectorLen {
     /// The number of groups of four elements, `N / 4`, usable in the types of arrays.
     #[rustc_always_gca]
@@ -224,7 +225,7 @@ pub type Quads<T, const N: usize> = [T; <VectorLen<N> as QuadVectorLen>::QUADS];
 pub type Half<E, const N: usize> = <VectorLen<N> as SupportedVectorLen>::Half<E>;
 
 /// The unsigned integer (or array of `u128`) with the size of an `N`-element vector of `E`, the
-/// type of its raw bits: `u8` ... `u128`, `[u128; 2]` or `[u128; 4]`.
+/// type of its raw bits: `u8` ... `u128`, `[u128; 2]`, `[u128; 4]` or `[u128; 8]`.
 pub type Bits<E, const N: usize> = <Storage<E, N> as AlignedStorage>::Bits;
 
 type Storage<E, const N: usize> =
@@ -250,6 +251,7 @@ vector_lens! {
     8 => pairs: 4, storage: StorageX4, half: 4,
     16 => pairs: 8, storage: StorageX8, half: 8,
     32 => pairs: 16, storage: StorageX16, half: 16,
+    64 => pairs: 32, storage: StorageX32, half: 32,
 }
 
 macro_rules! quad_vector_lens {
@@ -260,7 +262,7 @@ macro_rules! quad_vector_lens {
     )*};
 }
 
-quad_vector_lens!(4 => 1, 8 => 2, 16 => 4, 32 => 8);
+quad_vector_lens!(4 => 1, 8 => 2, 16 => 4, 32 => 8, 64 => 16);
 
 /// An array of pair words aligned to its size, the storage of a [`Vector`]. Implemented by the
 /// storage structs, one per pair width and number of pairs. Sealed.
@@ -285,6 +287,8 @@ pub trait PairBits: Copy + Pod + sealed::Sealed {
     type StorageX8: AlignedStorage;
     /// Storage of sixteen pairs.
     type StorageX16: AlignedStorage;
+    /// Storage of thirty-two pairs.
+    type StorageX32: AlignedStorage;
 }
 
 macro_rules! pair_storage {
@@ -310,23 +314,27 @@ macro_rules! pair_storage {
             pair_storage!(@assoc $($name),*);
         }
     };
-    (@assoc $x1:ident, $x2:ident, $x4:ident, $x8:ident, $x16:ident) => {
+    (@assoc $x1:ident, $x2:ident, $x4:ident, $x8:ident, $x16:ident, $x32:ident) => {
         type StorageX1 = $x1;
         type StorageX2 = $x2;
         type StorageX4 = $x4;
         type StorageX8 = $x8;
         type StorageX16 = $x16;
+        type StorageX32 = $x32;
     };
 }
 
-pair_storage!(u8: U8x1(1, 1, u8), U8x2(2, 2, u16), U8x4(4, 4, u32), U8x8(8, 8, u64), U8x16(16, 16, u128));
+pair_storage!(
+    u8: U8x1(1, 1, u8), U8x2(2, 2, u16), U8x4(4, 4, u32), U8x8(8, 8, u64), U8x16(16, 16, u128),
+    U8x32(32, 32, [u128; 2])
+);
 pair_storage!(
     u16: U16x1(1, 2, u16), U16x2(2, 4, u32), U16x4(4, 8, u64), U16x8(8, 16, u128),
-    U16x16(16, 32, [u128; 2])
+    U16x16(16, 32, [u128; 2]), U16x32(32, 64, [u128; 4])
 );
 pair_storage!(
     u32: U32x1(1, 4, u32), U32x2(2, 8, u64), U32x4(4, 16, u128), U32x8(8, 32, [u128; 2]),
-    U32x16(16, 64, [u128; 4])
+    U32x16(16, 64, [u128; 4]), U32x32(32, 128, [u128; 8])
 );
 
 /// How the elements of an element type are packed into the bytes of a [`Vector`].
@@ -354,7 +362,7 @@ pub trait VectorElement: Copy + Pod + Default + sealed::Sealed {
 
 /// `N` packed values of the element type `E`, aligned to their size.
 ///
-/// `N` is `2`, `4`, `8`, `16` or `32`. The element types are the floating-point formats of this
+/// `N` is `2`, `4`, `8`, `16`, `32` or `64`. The element types are the floating-point formats of this
 /// crate, and each has aliases of its vector types: [`f16xN`](crate::f16xN),
 /// [`f16x2`](crate::f16x2), ..., and the same for every other format. Code that is generic over
 /// the length bounds `VectorLen<N>: SupportedVectorLen`, and may be generic over the element type
@@ -616,14 +624,15 @@ where
 /// - `note` (optional): extra documentation paragraph added to every alias.
 /// - `eq` (optional): `elementwise` adds element-wise `PartialEq` (only the `f16` and `bf16`
 ///   vectors have it).
-/// - `aliases`: the names of the generic alias and of the aliases of 2, 4, 8, 16 and 32 elements.
+/// - `aliases`: the names of the generic alias and of the aliases of 2, 4, 8, 16, 32 and 64
+///   elements.
 ///
 /// ```ignore
 /// vector_element! {
 ///     elem: f8e4m3, pair: u16, packing: Bytes,
 ///     consts: [ZERO, ONE],
 ///     note: "Format description.",
-///     aliases: f8e4m3xN, f8e4m3x2, f8e4m3x4, f8e4m3x8, f8e4m3x16, f8e4m3x32,
+///     aliases: f8e4m3xN, f8e4m3x2, f8e4m3x4, f8e4m3x8, f8e4m3x16, f8e4m3x32, f8e4m3x64,
 /// }
 /// ```
 macro_rules! vector_element {
@@ -632,7 +641,7 @@ macro_rules! vector_element {
         consts: [$($const:ident),* $(,)?],
         $(note: $note:literal,)?
         $(eq: $eq:ident,)?
-        aliases: $xn:ident, $x2:ident, $x4:ident, $x8:ident, $x16:ident, $x32:ident $(,)?
+        aliases: $xn:ident, $x2:ident, $x4:ident, $x8:ident, $x16:ident, $x32:ident, $x64:ident $(,)?
     ) => {
         impl $crate::data_types::vector::sealed::Sealed for $elem {}
 
@@ -659,6 +668,7 @@ macro_rules! vector_element {
         vector_element!(@alias $xn, $x8, 8, "Eight", $elem, $packing, [$($note)?]);
         vector_element!(@alias $xn, $x16, 16, "Sixteen", $elem, $packing, [$($note)?]);
         vector_element!(@alias $xn, $x32, 32, "Thirty-two", $elem, $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x64, 64, "Sixty-four", $elem, $packing, [$($note)?]);
 
         const _: () = {
             assert!(size_of::<$x2>() == align_of::<$x2>());
@@ -666,6 +676,7 @@ macro_rules! vector_element {
             assert!(size_of::<$x8>() == align_of::<$x8>());
             assert!(size_of::<$x16>() == align_of::<$x16>());
             assert!(size_of::<$x32>() == align_of::<$x32>());
+            assert!(size_of::<$x64>() == align_of::<$x64>());
         };
 
         impl<const N: usize> $crate::Vector<$elem, N>

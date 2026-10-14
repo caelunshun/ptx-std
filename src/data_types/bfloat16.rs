@@ -424,7 +424,7 @@ vector_element! {
     ],
     note: "Arithmetic operators act element-wise and round to nearest, ties to even. Like [`bf16`](crate::bf16), addition, subtraction and multiplication are expressed as fused multiply-adds.",
     eq: elementwise,
-    aliases: bf16xN, bf16x2, bf16x4, bf16x8, bf16x16, bf16x32,
+    aliases: bf16xN, bf16x2, bf16x4, bf16x8, bf16x16, bf16x32, bf16x64,
 }
 
 half_vector!(bf16, "bf16");

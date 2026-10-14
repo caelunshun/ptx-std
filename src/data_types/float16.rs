@@ -548,7 +548,7 @@ vector_element! {
     ],
     note: "Arithmetic operators act element-wise, round to nearest, ties to even, and preserve subnormal values. Methods suffixed `_with` select instruction modifiers (flush-to-zero, saturation, ...) via const generics.",
     eq: elementwise,
-    aliases: f16xN, f16x2, f16x4, f16x8, f16x16, f16x32,
+    aliases: f16xN, f16x2, f16x4, f16x8, f16x16, f16x32, f16x64,
 }
 
 half_vector!(f16, "f16");
