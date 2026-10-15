@@ -4,7 +4,10 @@ use core::{
     simd::{Simd, SimdElement},
 };
 
-use crate::{Denormals, NanHandling, Overflow, Relu, Rounding, Saturation, XorSignAbs};
+use crate::{
+    Denormals, NanHandling, Overflow, Relu, Rounding, Saturation, SupportedVectorLen, VectorLen,
+    XorSignAbs, f32xN,
+};
 
 /// Rejects the rounding modes that are not IEEE 754 rounding modes at compile time.
 pub(crate) const fn assert_ieee_rounding(rnd: Rounding) {
@@ -84,11 +87,12 @@ pub(crate) use {with_ftz, with_rounding};
 
 /// Extensions for using PTX intrinsics operating on f32 values.
 ///
-/// The trait is implemented for [`f32`] and for [`Simd<f32, N>`](core::simd::Simd) of any width.
-/// Methods take and return `Self`, so on a `Simd` they operate lane-wise; the integer conversions
-/// return the associated integer types, which are the scalars for `f32` and `Simd`s of the same
-/// width for `Simd<f32, N>`. The documentation of these methods describes a single lane. The
-/// horizontal reductions (`reduce_*`) combine all lanes into one `f32`.
+/// The trait is implemented for [`f32`] and for the `f32` vectors [`f32xN<N>`](crate::f32xN) of
+/// every length. Methods take and return `Self`, so on a vector they operate element-wise; the
+/// integer conversions return the associated integer types, which are the scalars for `f32` and
+/// [`Simd`](core::simd::Simd)s of the same length for `f32xN<N>`. The documentation of these
+/// methods describes a single element. The horizontal reductions (`reduce_*`) combine all
+/// elements into one `f32`.
 ///
 /// Methods taking a [`Rounding`] accept [`Rounding::NearestEven`], [`Rounding::TowardZero`],
 /// [`Rounding::Down`] and [`Rounding::Up`]; other modes are rejected at compile time. Methods
@@ -104,32 +108,35 @@ pub(crate) use {with_ftz, with_rounding};
 /// the PTX ISA specifies an error bound, it is given in the method's documentation; some bounds
 /// only hold over a restricted input range.
 ///
-/// # `Simd<f32, N>` on Blackwell
+/// # `f32` vectors on Blackwell
 ///
 /// With `sm_100` or later, [`add_with`](F32Ext::add_with), [`mul_with`](F32Ext::mul_with) and
-/// [`fma`](F32Ext::fma) on `Simd<f32, N>` process pairs of lanes with the packed `add`, `mul` and
-/// `fma` `.f32x2` instructions, and handle the last lane of an odd-width vector with the scalar
-/// instruction. The packed instructions have no saturation modifier, so
-/// [`Saturation::ClampToUnit`] uses the scalar instructions on every lane.
-/// [`reduce_sum`](F32Ext::reduce_sum) adds pairs of lanes with `add.rn.f32x2`, and
+/// [`fma`](F32Ext::fma) on `f32xN<N>` process pairs of elements with the packed `add`, `mul` and
+/// `fma` `.f32x2` instructions. The packed instructions have no saturation modifier, so
+/// [`Saturation::ClampToUnit`] uses the scalar instructions on every element.
+/// [`reduce_sum`](F32Ext::reduce_sum) adds pairs of elements with `add.rn.f32x2`, and
 /// [`reduce_min_with`](F32Ext::reduce_min_with) and [`reduce_max_with`](F32Ext::reduce_max_with)
 /// use the three-input `min.f32` and `max.f32`. All other methods (and all methods on earlier
-/// architectures) apply the scalar instruction to each lane.
+/// architectures) apply the scalar instruction to each element.
 ///
-/// Note that LLVM can also lower the plain `+`, `-` and `*` operators of `Simd<f32, N>` to `f32x2`
+/// Note that LLVM can also lower the `+`, `-` and `*` operators of `f32xN<N>` to `f32x2`
 /// instructions on `sm_100` and later (with round-to-nearest-even and subnormals preserved); use the
 /// methods of this trait to select an explicit rounding mode or flush-to-zero.
 pub trait F32Ext: Sized {
-    /// The signed 32-bit integer type with the same shape as `Self`: `i32` for `f32`.
+    /// The signed 32-bit integer type with the same shape as `Self`: `i32` for `f32` and
+    /// `Simd<i32, N>` for `f32xN<N>`.
     type I32;
 
-    /// The unsigned 32-bit integer type with the same shape as `Self`: `u32` for `f32`.
+    /// The unsigned 32-bit integer type with the same shape as `Self`: `u32` for `f32` and
+    /// `Simd<u32, N>` for `f32xN<N>`.
     type U32;
 
-    /// The signed 64-bit integer type with the same shape as `Self`: `i64` for `f32`.
+    /// The signed 64-bit integer type with the same shape as `Self`: `i64` for `f32` and
+    /// `Simd<i64, N>` for `f32xN<N>`.
     type I64;
 
-    /// The unsigned 64-bit integer type with the same shape as `Self`: `u64` for `f32`.
+    /// The unsigned 64-bit integer type with the same shape as `Self`: `u64` for `f32` and
+    /// `Simd<u64, N>` for `f32xN<N>`.
     type U64;
 
     /// Adds two values.
@@ -313,19 +320,19 @@ pub trait F32Ext: Sized {
         rhs: Self,
     ) -> Self;
 
-    /// Sums all lanes. For `f32`, this returns `self`.
+    /// Sums all elements. For `f32`, this returns `self`.
     ///
-    /// The lanes are added with `add.rn.f32` (round to nearest, ties to even; subnormal values
+    /// The elements are added with `add.rn.f32` (round to nearest, ties to even; subnormal values
     /// are preserved) in an unspecified order, which may differ between architectures. On
-    /// `sm_100` and later, pairs of lanes are added with `add.rn.f32x2`.
+    /// `sm_100` and later, pairs of elements are added with `add.rn.f32x2`.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-add>
     fn reduce_sum(self) -> f32;
 
-    /// Finds the minimum lane. For `f32`, this returns `self`.
+    /// Finds the minimum element. For `f32`, this returns `self`.
     ///
-    /// `-0.0` is treated as less than `+0.0`. NaN lanes are ignored; the result is NaN only if
-    /// all lanes are NaN. Subnormal values are preserved. See
+    /// `-0.0` is treated as less than `+0.0`. NaN elements are ignored; the result is NaN only if
+    /// all elements are NaN. Subnormal values are preserved. See
     /// [`reduce_min_with`](F32Ext::reduce_min_with).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-min>
@@ -334,10 +341,10 @@ pub trait F32Ext: Sized {
         self.reduce_min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
     }
 
-    /// Finds the maximum lane. For `f32`, this returns `self`.
+    /// Finds the maximum element. For `f32`, this returns `self`.
     ///
-    /// `+0.0` is treated as greater than `-0.0`. NaN lanes are ignored; the result is NaN only if
-    /// all lanes are NaN. Subnormal values are preserved. See
+    /// `+0.0` is treated as greater than `-0.0`. NaN elements are ignored; the result is NaN only
+    /// if all elements are NaN. Subnormal values are preserved. See
     /// [`reduce_max_with`](F32Ext::reduce_max_with).
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-max>
@@ -346,27 +353,29 @@ pub trait F32Ext: Sized {
         self.reduce_max_with::<{ Denormals::Preserve }, { NanHandling::Ignore }>()
     }
 
-    /// Finds the minimum lane with explicit modifiers. For `f32`, this returns `self` unchanged.
+    /// Finds the minimum element with explicit modifiers. For `f32`, this returns `self`
+    /// unchanged.
     ///
-    /// `-0.0` is treated as less than `+0.0`. `NAN` selects whether NaN lanes are ignored
-    /// ([`NanHandling::Ignore`]; the result is NaN only if all lanes are NaN) or propagated
-    /// ([`NanHandling::Propagate`], which yields a canonical NaN if any lane is NaN). `DEN`
+    /// `-0.0` is treated as less than `+0.0`. `NAN` selects whether NaN elements are ignored
+    /// ([`NanHandling::Ignore`]; the result is NaN only if all elements are NaN) or propagated
+    /// ([`NanHandling::Propagate`], which yields a canonical NaN if any element is NaN). `DEN`
     /// selects the subnormal handling.
     ///
-    /// The lanes are combined with `min` instructions in a tree. On `sm_100` and later, the
+    /// The elements are combined with `min` instructions in a tree. On `sm_100` and later, the
     /// three-input form of `min.f32` combines three values per instruction.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-min>
     fn reduce_min_with<const DEN: Denormals, const NAN: NanHandling>(self) -> f32;
 
-    /// Finds the maximum lane with explicit modifiers. For `f32`, this returns `self` unchanged.
+    /// Finds the maximum element with explicit modifiers. For `f32`, this returns `self`
+    /// unchanged.
     ///
-    /// `+0.0` is treated as greater than `-0.0`. `NAN` selects whether NaN lanes are ignored
-    /// ([`NanHandling::Ignore`]; the result is NaN only if all lanes are NaN) or propagated
-    /// ([`NanHandling::Propagate`], which yields a canonical NaN if any lane is NaN). `DEN`
+    /// `+0.0` is treated as greater than `-0.0`. `NAN` selects whether NaN elements are ignored
+    /// ([`NanHandling::Ignore`]; the result is NaN only if all elements are NaN) or propagated
+    /// ([`NanHandling::Propagate`], which yields a canonical NaN if any element is NaN). `DEN`
     /// selects the subnormal handling.
     ///
-    /// The lanes are combined with `max` instructions in a tree. On `sm_100` and later, the
+    /// The elements are combined with `max` instructions in a tree. On `sm_100` and later, the
     /// three-input form of `max.f32` combines three values per instruction.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-max>
@@ -724,39 +733,54 @@ impl F32Ext for f32 {
     }
 }
 
-/// Applies `f` to every lane of `a`.
+/// Applies `f` to every element of `a`.
 #[inline(always)]
-fn map1<const N: usize, R: SimdElement>(a: Simd<f32, N>, f: impl Fn(f32) -> R) -> Simd<R, N> {
+fn map1<const N: usize>(a: f32xN<N>, f: impl Fn(f32) -> f32) -> f32xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
+    let a = a.to_array();
+    f32xN::from_array(crate::data_types::array_from_fn(|i| f(a[i])))
+}
+
+/// Converts every element of `a` with `f`.
+#[inline(always)]
+fn convert<const N: usize, R: SimdElement>(a: f32xN<N>, f: impl Fn(f32) -> R) -> Simd<R, N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     let a = a.to_array();
     Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i])))
 }
 
-/// Applies `f` to every pair of lanes of `a` and `b`.
+/// Applies `f` to every pair of elements of `a` and `b`.
 #[inline(always)]
-fn map2<const N: usize>(
-    a: Simd<f32, N>,
-    b: Simd<f32, N>,
-    f: impl Fn(f32, f32) -> f32,
-) -> Simd<f32, N> {
+fn map2<const N: usize>(a: f32xN<N>, b: f32xN<N>, f: impl Fn(f32, f32) -> f32) -> f32xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     let (a, b) = (a.to_array(), b.to_array());
-    Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i])))
+    f32xN::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i])))
 }
 
-/// Applies `f` to every triple of lanes of `a`, `b` and `c`.
+/// Applies `f` to every triple of elements of `a`, `b` and `c`.
 #[inline(always)]
 fn map3<const N: usize>(
-    a: Simd<f32, N>,
-    b: Simd<f32, N>,
-    c: Simd<f32, N>,
+    a: f32xN<N>,
+    b: f32xN<N>,
+    c: f32xN<N>,
     f: impl Fn(f32, f32, f32) -> f32,
-) -> Simd<f32, N> {
+) -> f32xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     let (a, b, c) = (a.to_array(), b.to_array(), c.to_array());
-    Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i], c[i])))
+    f32xN::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i], c[i])))
 }
 
-/// Reduces the lanes of `x` to a single value. Lanes `2 * i` and `2 * i + 1` form pair `i`; the
-/// pairs are combined lane-wise with `pair_op` in a tree, and the two lanes of the final pair
-/// (and the last lane if `N` is odd) with `op`.
+/// Reduces the elements of `x` (an even number) to a single value. Elements `2 * i` and
+/// `2 * i + 1` form pair `i`; the pairs are combined element-wise with `pair_op` in a tree, and
+/// the two elements of the final pair with `op`.
 ///
 /// The pairs are kept in `x`, used as a ring buffer of `N / 2` pairs holding a FIFO queue: step
 /// `k` pops the pairs at queue positions `2 * k` and `2 * k + 1` and pushes their combination at
@@ -768,25 +792,21 @@ fn reduce_pairs<const N: usize>(
     op: impl Fn(f32, f32) -> f32,
 ) -> f32 {
     let p = N / 2;
-    if p == 0 {
-        return x[0];
-    }
     #[rustc_unroll(full)]
     for k in 0..p - 1 {
         let (a, b) = (2 * k % p, (2 * k + 1) % p);
         [x[2 * k], x[2 * k + 1]] = pair_op([x[2 * a], x[2 * a + 1]], [x[2 * b], x[2 * b + 1]]);
     }
     let last = (2 * p - 2) % p;
-    let r = op(x[2 * last], x[2 * last + 1]);
-    if N % 2 == 1 { op(r, x[N - 1]) } else { r }
+    op(x[2 * last], x[2 * last + 1])
 }
 
-/// Reduces the lanes of `x` to a single value, combining three values per step with `op3`, and
+/// Reduces the elements of `x` to a single value, combining three values per step with `op3`, and
 /// two values with `op2` in the last step if `N` is even.
 ///
 /// `x` is used as a ring buffer holding a FIFO queue of values: step `k` pops the values at queue
 /// positions `3 * k` to `3 * k + 2` and pushes their combination at queue position `N + k`, i.e.
-/// into lane `k`. All indices are constant after unrolling.
+/// into element `k`. All indices are constant after unrolling.
 #[cfg(target_feature = "sm_100")]
 #[inline(always)]
 fn reduce_triples<const N: usize>(
@@ -860,8 +880,9 @@ mod minmax3 {
 #[cfg(target_feature = "sm_100")]
 mod packed {
     use super::*;
+    use crate::f32x2;
 
-    /// Emits `$op` on pairs of lanes. The pairs are packed into `.b64` registers and unpacked
+    /// Emits `$op` on pairs of elements. The pairs are packed into `.b64` registers and unpacked
     /// again inside the assembly block, with `mov.b64`.
     macro_rules! emit_f32x2 {
         ($op:literal $d:ident $a:ident $b:ident $rnd:literal, $ftz:literal) => {
@@ -911,8 +932,8 @@ mod packed {
         };
     }
 
-    /// Defines a function emitting the packed instruction `$op` on pairs of lanes, with the given
-    /// source operands.
+    /// Defines a function emitting the packed instruction `$op` on pairs of elements, with the
+    /// given source operands.
     macro_rules! packed_fn {
         ($name:ident, $op:literal, $($src:ident),+) => {
             #[inline(always)]
@@ -942,55 +963,43 @@ mod packed {
     packed_fn!(mul, "mul", a, b);
     packed_fn!(fma, "fma", a, b, c);
 
-    /// Applies `packed` to every pair of lanes of `a` and `b`, and `scalar` to the last lane if
-    /// `N` is odd.
+    /// Applies `packed` to every pair of elements of `a` and `b`.
     #[inline(always)]
     pub(super) fn map2<const N: usize>(
-        a: Simd<f32, N>,
-        b: Simd<f32, N>,
+        a: f32xN<N>,
+        b: f32xN<N>,
         packed: impl Fn([f32; 2], [f32; 2]) -> [f32; 2],
-        scalar: impl Fn(f32, f32) -> f32,
-    ) -> Simd<f32, N> {
-        let (a, b) = (a.to_array(), b.to_array());
-        let mut out = [0.0; N];
-        let mut i = 0;
-        #[rustc_unroll(full)]
-        while i + 2 <= N {
-            [out[i], out[i + 1]] = packed([a[i], a[i + 1]], [b[i], b[i + 1]]);
-            i += 2;
-        }
-        if i < N {
-            out[i] = scalar(a[i], b[i]);
-        }
-        Simd::from_array(out)
+    ) -> f32xN<N>
+    where
+        VectorLen<N>: SupportedVectorLen,
+    {
+        a.zip_pairs(b, |a, b| {
+            f32x2::from_array(packed(a.to_array(), b.to_array()))
+        })
     }
 
-    /// Applies `packed` to every pair of lanes of `a`, `b` and `c`, and `scalar` to the last lane
-    /// if `N` is odd.
+    /// Applies `packed` to every pair of elements of `a`, `b` and `c`.
     #[inline(always)]
     pub(super) fn map3<const N: usize>(
-        a: Simd<f32, N>,
-        b: Simd<f32, N>,
-        c: Simd<f32, N>,
+        a: f32xN<N>,
+        b: f32xN<N>,
+        c: f32xN<N>,
         packed: impl Fn([f32; 2], [f32; 2], [f32; 2]) -> [f32; 2],
-        scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Simd<f32, N> {
-        let (a, b, c) = (a.to_array(), b.to_array(), c.to_array());
-        let mut out = [0.0; N];
-        let mut i = 0;
-        #[rustc_unroll(full)]
-        while i + 2 <= N {
-            [out[i], out[i + 1]] = packed([a[i], a[i + 1]], [b[i], b[i + 1]], [c[i], c[i + 1]]);
-            i += 2;
-        }
-        if i < N {
-            out[i] = scalar(a[i], b[i], c[i]);
-        }
-        Simd::from_array(out)
+    ) -> f32xN<N>
+    where
+        VectorLen<N>: SupportedVectorLen,
+    {
+        let (a, b, c) = (a.to_x2s(), b.to_x2s(), c.to_x2s());
+        f32xN::from_x2s(crate::data_types::array_from_fn(|i| {
+            f32x2::from_array(packed(a[i].to_array(), b[i].to_array(), c[i].to_array()))
+        }))
     }
 }
 
-impl<const N: usize> F32Ext for Simd<f32, N> {
+impl<const N: usize> F32Ext for f32xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     type I32 = Simd<i32, N>;
     type U32 = Simd<u32, N>;
     type I64 = Simd<i64, N>;
@@ -1003,9 +1012,7 @@ impl<const N: usize> F32Ext for Simd<f32, N> {
     ) -> Self {
         #[cfg(target_feature = "sm_100")]
         if const { !matches!(SAT, Saturation::ClampToUnit) } {
-            return packed::map2(self, rhs, packed::add::<RND, DEN>, |a, b| {
-                a.add_with::<RND, DEN, SAT>(b)
-            });
+            return packed::map2(self, rhs, packed::add::<RND, DEN>);
         }
         map2(self, rhs, |a, b| a.add_with::<RND, DEN, SAT>(b))
     }
@@ -1013,9 +1020,7 @@ impl<const N: usize> F32Ext for Simd<f32, N> {
     #[inline]
     fn mul_with<const RND: Rounding, const DEN: Denormals>(self, rhs: Self) -> Self {
         #[cfg(target_feature = "sm_100")]
-        return packed::map2(self, rhs, packed::mul::<RND, DEN>, |a, b| {
-            a.mul_with::<RND, DEN>(b)
-        });
+        return packed::map2(self, rhs, packed::mul::<RND, DEN>);
         #[cfg(not(target_feature = "sm_100"))]
         map2(self, rhs, |a, b| a.mul_with::<RND, DEN>(b))
     }
@@ -1028,9 +1033,7 @@ impl<const N: usize> F32Ext for Simd<f32, N> {
     ) -> Self {
         #[cfg(target_feature = "sm_100")]
         if const { !matches!(SAT, Saturation::ClampToUnit) } {
-            return packed::map3(self, b, c, packed::fma::<RND, DEN>, |a, b, c| {
-                a.fma::<RND, DEN, SAT>(b, c)
-            });
+            return packed::map3(self, b, c, packed::fma::<RND, DEN>);
         }
         map3(self, b, c, |a, b, c| a.fma::<RND, DEN, SAT>(b, c))
     }
@@ -1163,22 +1166,22 @@ impl<const N: usize> F32Ext for Simd<f32, N> {
 
     #[inline]
     fn to_i32<const RND: Rounding, const DEN: Denormals>(self) -> Self::I32 {
-        map1(self, |a| a.to_i32::<RND, DEN>())
+        convert(self, |a| a.to_i32::<RND, DEN>())
     }
 
     #[inline]
     fn to_u32<const RND: Rounding, const DEN: Denormals>(self) -> Self::U32 {
-        map1(self, |a| a.to_u32::<RND, DEN>())
+        convert(self, |a| a.to_u32::<RND, DEN>())
     }
 
     #[inline]
     fn to_i64<const RND: Rounding, const DEN: Denormals>(self) -> Self::I64 {
-        map1(self, |a| a.to_i64::<RND, DEN>())
+        convert(self, |a| a.to_i64::<RND, DEN>())
     }
 
     #[inline]
     fn to_u64<const RND: Rounding, const DEN: Denormals>(self) -> Self::U64 {
-        map1(self, |a| a.to_u64::<RND, DEN>())
+        convert(self, |a| a.to_u64::<RND, DEN>())
     }
 
     #[inline]

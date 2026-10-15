@@ -1,11 +1,12 @@
 // --- LLM-generated --- //
 //! Warp collectives on the vector types: shuffles and matches of values of any size (including
-//! types with a partial last word), and lane-wise `redux.sync` on `Simd` vectors. Each lane reads
-//! its own operand, since `ptxas` folds collectives on values it can prove to be warp-uniform.
+//! types with a partial last word), and element-wise `redux.sync` on integer `Simd` vectors and
+//! `f32` vectors. Each lane reads its own operand, since `ptxas` folds collectives on values it
+//! can prove to be warp-uniform.
 
 use core::simd::Simd;
 use ptx_std::{
-    bf16x8, f4e2m1, f4e2m1x2, f4e2m1x32, f8e4m3x2, f16, f16x2, f16x16, f16x32, lane_id,
+    bf16x8, f4e2m1, f4e2m1x2, f4e2m1x32, f8e4m3x2, f16, f16x2, f16x16, f16x32, f32x8, lane_id,
     warp_collectives::{
         LaneMask, ReduxOp, ShuffleMode, match_all, match_any, reduce, shuffle, shuffle_down,
         shuffle_segmented, shuffle_up, shuffle_xor, try_shuffle_down,
@@ -53,8 +54,8 @@ exchange_kernel!(warp_bf16x8, bf16x8);
 exchange_kernel!(warp_f16x16, f16x16);
 exchange_kernel!(warp_f4e2m1x32, f4e2m1x32);
 exchange_kernel!(warp_f16x32, f16x32);
-exchange_kernel!(warp_f32x3, Simd<f32, 3>);
-exchange_kernel!(warp_f32x8, Simd<f32, 8>);
+exchange_kernel!(warp_f32_array3, [f32; 3]);
+exchange_kernel!(warp_f32x8, f32x8);
 
 /// Instantiates every integer `redux.sync` operation on `$ty`.
 macro_rules! redux_kernel {
@@ -84,9 +85,8 @@ redux_kernel!(redux_u32x32, Simd<u32, 32>);
 
 #[cfg(target_feature = "sm_100f")]
 mod float {
-    use core::simd::Simd;
     use ptx_std::{
-        NanHandling, lane_id,
+        NanHandling, f32x4, lane_id,
         warp_collectives::{Absolute, LaneMask, ReduxOp, reduce_f32},
     };
 
@@ -129,5 +129,5 @@ mod float {
     }
 
     redux_f32_kernel!(redux_f32, f32);
-    redux_f32_kernel!(redux_f32x4, Simd<f32, 4>);
+    redux_f32_kernel!(redux_f32x4, f32x4);
 }

@@ -16,7 +16,7 @@
 
 use crate::data_types::array_from_fn;
 #[cfg(target_feature = "sm_100f")]
-use crate::modifiers::NanHandling;
+use crate::{SupportedVectorLen, VectorLen, f32xN, modifiers::NanHandling};
 use bytemuck::{Pod, Zeroable};
 use core::{
     arch::nvptx as nv,
@@ -701,6 +701,7 @@ pub enum Absolute {
 }
 
 mod sealed {
+    use crate::{SupportedVectorLen, VectorLen, f32xN};
     use core::simd::Simd;
 
     pub trait Sealed {}
@@ -709,7 +710,7 @@ mod sealed {
     impl Sealed for f32 {}
     impl<const N: usize> Sealed for Simd<u32, N> {}
     impl<const N: usize> Sealed for Simd<i32, N> {}
-    impl<const N: usize> Sealed for Simd<f32, N> {}
+    impl<const N: usize> Sealed for f32xN<N> where VectorLen<N>: SupportedVectorLen {}
 }
 
 /// Integer types that can be reduced across a warp with [`reduce`]: `u32`, `i32`, and `Simd`
@@ -792,8 +793,9 @@ pub unsafe fn reduce<const OP: ReduxOp, T: ReduxInt>(mask: LaneMask, value: T) -
     unsafe { T::reduce::<OP>(mask, value) }
 }
 
-/// Floating-point types that can be reduced across a warp with [`reduce_f32`]: `f32` and
-/// `Simd<f32, N>`, whose lanes are reduced independently (one `redux.sync` per lane).
+/// Floating-point types that can be reduced across a warp with [`reduce_f32`]: `f32` and the `f32`
+/// vectors [`f32xN<N>`](crate::f32xN), whose elements are reduced independently (one
+/// `redux.sync` per element).
 #[cfg(target_feature = "sm_100f")]
 pub trait ReduxF32: Copy + sealed::Sealed {
     #[doc(hidden)]
@@ -827,22 +829,25 @@ impl ReduxF32 for f32 {
 }
 
 #[cfg(target_feature = "sm_100f")]
-impl<const N: usize> ReduxF32 for Simd<f32, N> {
+impl<const N: usize> ReduxF32 for f32xN<N>
+where
+    VectorLen<N>: SupportedVectorLen,
+{
     #[inline(always)]
     unsafe fn reduce<const OP: ReduxOp, const ABS: Absolute, const NAN: NanHandling>(
         mask: LaneMask,
         value: Self,
     ) -> Self {
         let value = value.to_array();
-        Simd::from_array(array_from_fn(|i| unsafe {
+        f32xN::from_array(array_from_fn(|i| unsafe {
             f32::reduce::<OP, ABS, NAN>(mask, value[i])
         }))
     }
 }
 
-/// Reduces the `f32` `value` (or each lane of a `Simd<f32, N>` independently) across the
+/// Reduces the `f32` `value` (or each element of an `f32xN<N>` independently) across the
 /// non-exited threads of `mask` with the operation `OP` and returns the result to all of them
-/// (`redux.sync.{min,max}{.abs}{.NaN}.f32`, one per lane).
+/// (`redux.sync.{min,max}{.abs}{.NaN}.f32`, one per element).
 ///
 /// `OP` must be [`ReduxOp::Min`] or [`ReduxOp::Max`]. If `ABS` is [`Absolute::Enabled`], the
 /// absolute values of the inputs are reduced. With [`NanHandling::Ignore`], NaN inputs are ignored

@@ -13,12 +13,13 @@
 //!   length, and thin kernels that instantiate them per width.
 //! - `generic.rs`: kernels written the way users will write code generic over the vector length.
 //! - `narrow.rs`: conversions of the narrow formats.
-//! - `f32.rs`: `F32Ext`.
+//! - `f32.rs`: `F32Ext`, and the operators and inherent methods of the `f32` vectors.
 //! - `warp.rs`: warp collectives (shuffles, matches and reductions) on the vector types.
 //!
 //! Every kernel takes the operands as pointers so that nothing is constant-folded. Variants that
 //! are only available on some targets are instantiated under the same `cfg`s as in the library.
-//! Note that the `f32` module shadows the primitive type in this file, so it is not used here.
+//! Note that the `f32` module shadows the primitive type in this file, so the `f32` container
+//! kernels are instantiated in `f32.rs`.
 
 #![no_std]
 #![feature(abi_ptx, portable_simd)]

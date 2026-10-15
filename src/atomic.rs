@@ -29,7 +29,7 @@
 //! # Packed and vector types
 //!
 //! Operations on the packed types [`f16x2`] and [`bf16x2`], and on the vector types [`f16x4`],
-//! [`f16x8`], [`bf16x4`], [`bf16x8`] and `Simd<f32, 2 | 4>` (the vector forms `.v2` and `.v4`),
+//! [`f16x8`], [`bf16x4`], [`bf16x8`], [`f32x2`] and [`f32x4`] (the vector forms `.v2` and `.v4`),
 //! access adjacent scalar elements in memory. Atomicity is guaranteed separately for each scalar
 //! element; the operation as a whole is not guaranteed to be atomic as a single access. The
 //! vector forms require `sm_90` and global memory: `SPACE` must be [`AtomicSpace::Generic`] or
@@ -63,8 +63,6 @@
 //!
 //! <https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-atom>
 
-#[cfg(target_feature = "sm_90")]
-use core::simd::Simd;
 use core::{arch::asm, marker::ConstParamTy};
 
 #[cfg(target_feature = "sm_90")]
@@ -77,7 +75,7 @@ use crate::{
     modifiers::{MemoryOrdering, Scope},
 };
 #[cfg(target_feature = "sm_90")]
-use crate::{bf16x4, bf16x8, f16x4, f16x8};
+use crate::{bf16x4, bf16x8, f16x4, f16x8, f32x2, f32x4};
 use sealed::Op;
 
 /// The state space that the address of an atomic operation points into.
@@ -211,7 +209,7 @@ mod sealed {
 ///
 /// This trait is sealed. It is implemented for `u32`, `i32`, `u64`, `i64`, `f32`, `f64`,
 /// [`f16`](struct@f16) and [`f16x2`], and with `sm_90` also for [`bf16`], [`bf16x2`], the vector
-/// types [`f16x4`], [`f16x8`], [`bf16x4`] and [`bf16x8`], and `Simd<f32, 2>` and `Simd<f32, 4>`.
+/// types [`f16x4`], [`f16x8`], [`bf16x4`], [`bf16x8`], [`f32x2`] and [`f32x4`].
 ///
 /// `i64` is added with the `.u64` form, as PTX has no `.add.s64`; the result is identical in two's
 /// complement. Floating-point addition on `f64` requires `sm_60`, on `f16x2` `sm_60` and on
@@ -761,15 +759,15 @@ impl_rmw! {
             }
     }
     #[cfg(target_feature = "sm_90")]
-    Simd<f32, 2>: AtomicAdd {
+    f32x2: AtomicAdd {
         reg32 ([0 1] [2 3]), global,
-            |v| v.to_array().map(f32::to_bits), |r| Simd::from_array(r.map(f32::from_bits));
+            |v| v.to_array().map(f32::to_bits), |r| f32x2::from_array(r.map(f32::from_bits));
             { Add => ".add" ".v2.f32" }
     }
     #[cfg(target_feature = "sm_90")]
-    Simd<f32, 4>: AtomicAdd {
+    f32x4: AtomicAdd {
         reg32 ([0 1 2 3] [4 5 6 7]), global,
-            |v| v.to_array().map(f32::to_bits), |r| Simd::from_array(r.map(f32::from_bits));
+            |v| v.to_array().map(f32::to_bits), |r| f32x4::from_array(r.map(f32::from_bits));
             { Add => ".add" ".v4.f32" }
     }
 }
@@ -1149,8 +1147,8 @@ rmw_fns! {
     /// Atomically adds `value` to `*ptr` (`.add`).
     ///
     /// Integer addition wraps around on overflow. Floating-point addition rounds to nearest
-    /// even. `f32` addition (including `Simd<f32, 2 | 4>`) flushes subnormal inputs and results to
-    /// sign-preserving zero in global memory, but preserves them in shared memory.
+    /// even. `f32` addition (including [`f32x2`] and [`f32x4`]) flushes subnormal inputs and
+    /// results to sign-preserving zero in global memory, but preserves them in shared memory.
     /// Addition of all other floating-point types preserves subnormals (`.noftz`).
     [T: AtomicAdd,] T, Add,
     atom_add, atom_add_with_cache_hint, red_add, red_add_with_cache_hint

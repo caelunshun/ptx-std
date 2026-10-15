@@ -7,16 +7,18 @@
 //!
 //! All vectors of all formats are one type, [`Vector<E, N>`], where `E` implements
 //! [`VectorElement`] and `N` is a length supported by [`SupportedVectorLen`] (`VectorLen<N>`). The
-//! familiar names (`f16x4`, `f8e4m3x32`, ...) are aliases. The vector is stored as an array of
-//! pairs (`N / 2` words of the unit of the packed PTX instructions, such as `.f16x2` or `.e4m3x2`),
-//! inside a storage struct aligned to the size of the whole vector.
+//! familiar names (`f32x8`, `f16x4`, `f8e4m3x32`, ...) are aliases. The vector is stored as an
+//! array of pairs (`N / 2` words of the unit of the packed PTX instructions, such as `.f32x2`,
+//! `.f16x2` or `.e4m3x2`), inside a storage struct aligned to the size of the whole vector.
 //!
 //! - [`narrow_scalar!`] defines the one-byte scalars of the narrow formats (FP8, FP6, FP4, s2f6).
-//!   `f16` and `bf16` are defined by hand.
+//!   `f16` and `bf16` are defined by hand, and `f32` is the primitive type.
 //! - [`vector_element!`] makes a scalar a [`VectorElement`] and defines the aliases, the splatted
 //!   constants and the `From` conversion to arrays of its vectors.
-//! - [`half_vector!`] adds what the `f16` and `bf16` vectors share: the `f32` conversions,
-//!   `reduce_sum`, the scalar broadcast operators and the conversion to `Simd<f32, N>`.
+//! - [`broadcast_ops!`] adds the operators with a scalar operand and the compound assignment
+//!   operators of the vectors of a format.
+//! - [`half_vector!`] adds what the `f16` and `bf16` vectors share: the conversions from and to
+//!   the `f32` vectors, `reduce_sum` and the [`broadcast_ops!`] of `+`, `-` and `*`.
 //!
 //! Format specific operations are written once per format as private methods on the pair type
 //! (`Vector<E, 2>`), and once, generically over the length, as public methods that map over the
@@ -225,7 +227,7 @@ pub type Quads<T, const N: usize> = [T; <VectorLen<N> as QuadVectorLen>::QUADS];
 pub type Half<E, const N: usize> = <VectorLen<N> as SupportedVectorLen>::Half<E>;
 
 /// The unsigned integer (or array of `u128`) with the size of an `N`-element vector of `E`, the
-/// type of its raw bits: `u8` ... `u128`, `[u128; 2]`, `[u128; 4]` or `[u128; 8]`.
+/// type of its raw bits: `u8` ... `u128`, `[u128; 2]`, `[u128; 4]`, `[u128; 8]` or `[u128; 16]`.
 pub type Bits<E, const N: usize> = <Storage<E, N> as AlignedStorage>::Bits;
 
 type Storage<E, const N: usize> =
@@ -272,8 +274,8 @@ pub trait AlignedStorage: Copy + Pod + sealed::Sealed {
 }
 
 /// The unit of the packed PTX instructions of an element type: the unsigned integer holding a pair
-/// of elements, `u32` for the 16-bit formats, `u16` for the 8-bit formats and `u8` for the 4-bit
-/// formats. Sealed.
+/// of elements, `u64` for `f32`, `u32` for the 16-bit formats, `u16` for the 8-bit formats and
+/// `u8` for the 4-bit formats. Sealed.
 pub trait PairBits: Copy + Pod + sealed::Sealed {
     /// All bits zero.
     const ZEROED: Self;
@@ -336,6 +338,10 @@ pair_storage!(
     u32: U32x1(1, 4, u32), U32x2(2, 8, u64), U32x4(4, 16, u128), U32x8(8, 32, [u128; 2]),
     U32x16(16, 64, [u128; 4]), U32x32(32, 128, [u128; 8])
 );
+pair_storage!(
+    u64: U64x1(1, 8, u64), U64x2(2, 16, u128), U64x4(4, 32, [u128; 2]), U64x8(8, 64, [u128; 4]),
+    U64x16(16, 128, [u128; 8]), U64x32(32, 256, [u128; 16])
+);
 
 /// How the elements of an element type are packed into the bytes of a [`Vector`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -362,9 +368,9 @@ pub trait VectorElement: Copy + Pod + Default + sealed::Sealed {
 
 /// `N` packed values of the element type `E`, aligned to their size.
 ///
-/// `N` is `2`, `4`, `8`, `16`, `32` or `64`. The element types are the floating-point formats of this
-/// crate, and each has aliases of its vector types: [`f16xN`](crate::f16xN),
-/// [`f16x2`](crate::f16x2), ..., and the same for every other format. Code that is generic over
+/// `N` is `2`, `4`, `8`, `16`, `32` or `64`. The element types are `f32` and the floating-point
+/// formats of this crate, and each has aliases of its vector types: [`f32xN`](crate::f32xN),
+/// [`f32x2`](crate::f32x2), ..., and the same for every other format. Code that is generic over
 /// the length bounds `VectorLen<N>: SupportedVectorLen`, and may be generic over the element type
 /// with `E: VectorElement`.
 ///
@@ -616,14 +622,16 @@ where
 /// Makes the scalar `$elem` a [`VectorElement`] and defines the aliases of its vectors, their
 /// splatted constants and the conversions to arrays.
 ///
-/// - `pair`: the unsigned integer holding a pair of elements (`u32`, `u16` or `u8`).
+/// - `name` (optional): the documentation text naming the scalar, a link to `crate::$elem` by
+///   default.
+/// - `pair`: the unsigned integer holding a pair of elements (`u64`, `u32`, `u16` or `u8`).
 /// - `packing`: `Bytes` if each element occupies a whole number of bytes, or `Nibbles` if two
 ///   elements share a byte (`f4e2m1`). A `Nibbles` element is a one-byte scalar whose `from_bits`
 ///   masks the low nibble.
 /// - `consts`: the constants of the scalar to re-export splatted on each vector.
 /// - `note` (optional): extra documentation paragraph added to every alias.
-/// - `eq` (optional): `elementwise` adds element-wise `PartialEq` (only the `f16` and `bf16`
-///   vectors have it).
+/// - `eq` (optional): `elementwise` adds element-wise `PartialEq` (only the `f32`, `f16` and
+///   `bf16` vectors have it).
 /// - `aliases`: the names of the generic alias and of the aliases of 2, 4, 8, 16, 32 and 64
 ///   elements.
 ///
@@ -637,7 +645,7 @@ where
 /// ```
 macro_rules! vector_element {
     (
-        elem: $elem:ident, pair: $pair:ident, packing: $packing:ident,
+        elem: $elem:ident, $(name: $name:literal,)? pair: $pair:ident, packing: $packing:ident,
         consts: [$($const:ident),* $(,)?],
         $(note: $note:literal,)?
         $(eq: $eq:ident,)?
@@ -652,7 +660,7 @@ macro_rules! vector_element {
             const NAME: &'static str = stringify!($elem);
         }
 
-        #[doc = concat!("`N` packed [`", stringify!($elem), "`](crate::", stringify!($elem), ") values, aligned to their size.")]
+        #[doc = concat!("`N` packed ", vector_element!(@name $elem $($name)?), " values, aligned to their size.")]
         ///
         #[doc = concat!("An alias of [`Vector<", stringify!($elem), ", N>`](crate::Vector).")]
         ///
@@ -663,12 +671,12 @@ macro_rules! vector_element {
         )?
         pub type $xn<const N: usize> = $crate::Vector<$elem, N>;
 
-        vector_element!(@alias $xn, $x2, 2, "Two", $elem, $packing, [$($note)?]);
-        vector_element!(@alias $xn, $x4, 4, "Four", $elem, $packing, [$($note)?]);
-        vector_element!(@alias $xn, $x8, 8, "Eight", $elem, $packing, [$($note)?]);
-        vector_element!(@alias $xn, $x16, 16, "Sixteen", $elem, $packing, [$($note)?]);
-        vector_element!(@alias $xn, $x32, 32, "Thirty-two", $elem, $packing, [$($note)?]);
-        vector_element!(@alias $xn, $x64, 64, "Sixty-four", $elem, $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x2, 2, "Two", $elem, [$($name)?], $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x4, 4, "Four", $elem, [$($name)?], $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x8, 8, "Eight", $elem, [$($name)?], $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x16, 16, "Sixteen", $elem, [$($name)?], $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x32, 32, "Thirty-two", $elem, [$($name)?], $packing, [$($note)?]);
+        vector_element!(@alias $xn, $x64, 64, "Sixty-four", $elem, [$($name)?], $packing, [$($note)?]);
 
         const _: () = {
             assert!(size_of::<$x2>() == align_of::<$x2>());
@@ -702,8 +710,11 @@ macro_rules! vector_element {
         $(vector_element!(@eq $eq $elem);)?
     };
 
-    (@alias $xn:ident, $ty:ident, $n:literal, $count:literal, $elem:ident, $packing:ident, [$($note:literal)?]) => {
-        #[doc = concat!($count, " packed [`", stringify!($elem), "`](crate::", stringify!($elem), ") values, aligned to their size.")]
+    (
+        @alias $xn:ident, $ty:ident, $n:literal, $count:literal, $elem:ident, [$($name:literal)?],
+        $packing:ident, [$($note:literal)?]
+    ) => {
+        #[doc = concat!($count, " packed ", vector_element!(@name $elem $($name)?), " values, aligned to their size.")]
         ///
         #[doc = concat!("An alias of [`", stringify!($xn), "<", stringify!($n), ">`](crate::", stringify!($xn), ").")]
         ///
@@ -714,6 +725,11 @@ macro_rules! vector_element {
         )?
         pub type $ty = $xn<$n>;
     };
+
+    (@name $elem:ident) => {
+        concat!("[`", stringify!($elem), "`](crate::", stringify!($elem), ")")
+    };
+    (@name $elem:ident $name:literal) => { $name };
 
     (@pack_doc Bytes) => { "Element 0 occupies the least significant bits." };
     (@pack_doc Nibbles) => {
@@ -733,9 +749,65 @@ macro_rules! vector_element {
     };
 }
 
+/// Implements, for the vectors of the scalar `$elem` and each given operator, the operator with a
+/// scalar operand on either side, which is broadcast with [`Vector::splat`], and the compound
+/// assignment operators with a vector and with a scalar operand. The operator between two vectors
+/// must be implemented separately.
+///
+/// ```ignore
+/// broadcast_ops!(f16: Add add AddAssign add_assign, Mul mul MulAssign mul_assign);
+/// ```
+macro_rules! broadcast_ops {
+    ($elem:ident: $($op:ident $method:ident $assign:ident $assign_method:ident),* $(,)?) => {$(
+        impl<const N: usize> ::core::ops::$op<$elem> for $crate::Vector<$elem, N>
+        where
+            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+        {
+            type Output = Self;
+
+            #[inline(always)]
+            fn $method(self, rhs: $elem) -> Self {
+                ::core::ops::$op::$method(self, Self::splat(rhs))
+            }
+        }
+
+        impl<const N: usize> ::core::ops::$op<$crate::Vector<$elem, N>> for $elem
+        where
+            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+        {
+            type Output = $crate::Vector<$elem, N>;
+
+            #[inline(always)]
+            fn $method(self, rhs: $crate::Vector<$elem, N>) -> Self::Output {
+                ::core::ops::$op::$method($crate::Vector::splat(self), rhs)
+            }
+        }
+
+        impl<const N: usize> ::core::ops::$assign for $crate::Vector<$elem, N>
+        where
+            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+        {
+            #[inline(always)]
+            fn $assign_method(&mut self, rhs: Self) {
+                *self = ::core::ops::$op::$method(*self, rhs);
+            }
+        }
+
+        impl<const N: usize> ::core::ops::$assign<$elem> for $crate::Vector<$elem, N>
+        where
+            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+        {
+            #[inline(always)]
+            fn $assign_method(&mut self, rhs: $elem) {
+                *self = ::core::ops::$op::$method(*self, rhs);
+            }
+        }
+    )*};
+}
+
 /// Implements what the `f16` and `bf16` vectors share, for the scalar `$elem` and the name
-/// `$ptx` of its PTX type: `from_f32`, `from_f32_with`, `reduce_sum`, the scalar broadcast
-/// operators and the conversion to `Simd<f32, N>`, all generic over the length `N`.
+/// `$ptx` of its PTX type: `from_f32`, `from_f32_with`, `reduce_sum`, the [`broadcast_ops!`] of
+/// `+`, `-` and `*`, and the conversion to the `f32` vectors, all generic over the length `N`.
 ///
 /// The scalar must provide `fn add_to_f32(self, acc: f32) -> f32` and the pair type
 /// `fn pair_from_f32_with`, with the signature of that of `f16`, and
@@ -753,7 +825,7 @@ macro_rules! half_vector {
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
-            pub fn from_f32(x: ::core::simd::Simd<f32, N>) -> Self {
+            pub fn from_f32(x: $crate::f32xN<N>) -> Self {
                 Self::from_f32_with::<
                     { $crate::Rounding::NearestEven },
                     { $crate::Relu::Disabled },
@@ -778,7 +850,7 @@ macro_rules! half_vector {
                 const R: $crate::Relu,
                 const O: $crate::Overflow,
             >(
-                x: ::core::simd::Simd<f32, N>,
+                x: $crate::f32xN<N>,
             ) -> Self {
                 const {
                     assert!(
@@ -789,12 +861,9 @@ macro_rules! half_vector {
                         "vector conversion only supports NearestEven and TowardZero rounding"
                     );
                 }
-                let x = x.to_array();
+                let x = x.to_x2s();
                 Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $crate::Vector::<$elem, 2>::pair_from_f32_with::<RND, R, O>([
-                        x[2 * i],
-                        x[2 * i + 1],
-                    ])
+                    $crate::Vector::<$elem, 2>::pair_from_f32_with::<RND, R, O>(x[i].to_array())
                 }))
             }
 
@@ -835,140 +904,12 @@ macro_rules! half_vector {
             }
         }
 
-        impl<const N: usize> ::core::ops::Add<$elem> for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            type Output = Self;
+        $crate::data_types::vector::broadcast_ops!(
+            $elem: Add add AddAssign add_assign, Sub sub SubAssign sub_assign,
+            Mul mul MulAssign mul_assign,
+        );
 
-            #[inline(always)]
-            fn add(self, rhs: $elem) -> Self {
-                self + Self::splat(rhs)
-            }
-        }
-
-        impl<const N: usize> ::core::ops::Sub<$elem> for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            type Output = Self;
-
-            #[inline(always)]
-            fn sub(self, rhs: $elem) -> Self {
-                self - Self::splat(rhs)
-            }
-        }
-
-        impl<const N: usize> ::core::ops::Mul<$elem> for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            type Output = Self;
-
-            #[inline(always)]
-            fn mul(self, rhs: $elem) -> Self {
-                self * Self::splat(rhs)
-            }
-        }
-
-        impl<const N: usize> ::core::ops::Add<$crate::Vector<$elem, N>> for $elem
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            type Output = $crate::Vector<$elem, N>;
-
-            #[inline(always)]
-            fn add(self, rhs: $crate::Vector<$elem, N>) -> Self::Output {
-                $crate::Vector::splat(self) + rhs
-            }
-        }
-
-        impl<const N: usize> ::core::ops::Sub<$crate::Vector<$elem, N>> for $elem
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            type Output = $crate::Vector<$elem, N>;
-
-            #[inline(always)]
-            fn sub(self, rhs: $crate::Vector<$elem, N>) -> Self::Output {
-                $crate::Vector::splat(self) - rhs
-            }
-        }
-
-        impl<const N: usize> ::core::ops::Mul<$crate::Vector<$elem, N>> for $elem
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            type Output = $crate::Vector<$elem, N>;
-
-            #[inline(always)]
-            fn mul(self, rhs: $crate::Vector<$elem, N>) -> Self::Output {
-                $crate::Vector::splat(self) * rhs
-            }
-        }
-
-        impl<const N: usize> ::core::ops::AddAssign for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            #[inline(always)]
-            fn add_assign(&mut self, rhs: Self) {
-                *self = *self + rhs;
-            }
-        }
-
-        impl<const N: usize> ::core::ops::SubAssign for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            #[inline(always)]
-            fn sub_assign(&mut self, rhs: Self) {
-                *self = *self - rhs;
-            }
-        }
-
-        impl<const N: usize> ::core::ops::MulAssign for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            #[inline(always)]
-            fn mul_assign(&mut self, rhs: Self) {
-                *self = *self * rhs;
-            }
-        }
-
-        impl<const N: usize> ::core::ops::AddAssign<$elem> for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            #[inline(always)]
-            fn add_assign(&mut self, rhs: $elem) {
-                *self = *self + rhs;
-            }
-        }
-
-        impl<const N: usize> ::core::ops::SubAssign<$elem> for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            #[inline(always)]
-            fn sub_assign(&mut self, rhs: $elem) {
-                *self = *self - rhs;
-            }
-        }
-
-        impl<const N: usize> ::core::ops::MulAssign<$elem> for $crate::Vector<$elem, N>
-        where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
-        {
-            #[inline(always)]
-            fn mul_assign(&mut self, rhs: $elem) {
-                *self = *self * rhs;
-            }
-        }
-
-        impl<const N: usize> ::core::convert::From<$crate::Vector<$elem, N>>
-            for ::core::simd::Simd<f32, N>
+        impl<const N: usize> ::core::convert::From<$crate::Vector<$elem, N>> for $crate::f32xN<N>
         where
             $crate::VectorLen<N>: $crate::SupportedVectorLen,
         {
@@ -980,4 +921,4 @@ macro_rules! half_vector {
     };
 }
 
-pub(crate) use {half_vector, narrow_scalar, vector_element};
+pub(crate) use {broadcast_ops, half_vector, narrow_scalar, vector_element};

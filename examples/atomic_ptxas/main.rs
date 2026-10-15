@@ -7,7 +7,6 @@
 
 #![no_std]
 #![feature(abi_ptx)]
-#![cfg_attr(target_feature = "sm_90", feature(portable_simd))]
 #![allow(clippy::missing_safety_doc)]
 
 use ptx_std::{
@@ -163,8 +162,7 @@ rmw_kernel!(rmw_f16x2, f16x2, [Generic Global SharedCta], add);
 #[cfg(target_feature = "sm_90")]
 mod sm90 {
     use super::*;
-    use core::simd::Simd;
-    use ptx_std::{bf16x4, bf16x8, f16x4, f16x8};
+    use ptx_std::{bf16x4, bf16x8, f16x4, f16x8, f32x2, f32x4};
 
     rmw_kernel!(rmw_bf16, bf16, [Generic Global SharedCta SharedCluster], add);
     rmw_kernel!(rmw_bf16x2, bf16x2, [Generic Global SharedCta SharedCluster], add);
@@ -178,8 +176,8 @@ mod sm90 {
     rmw_kernel!(rmw_f16x8, f16x8, [Generic Global], add min max);
     rmw_kernel!(rmw_bf16x4, bf16x4, [Generic Global], add min max);
     rmw_kernel!(rmw_bf16x8, bf16x8, [Generic Global], add min max);
-    rmw_kernel!(rmw_f32x2, Simd<f32, 2>, [Generic Global], add);
-    rmw_kernel!(rmw_f32x4, Simd<f32, 4>, [Generic Global], add);
+    rmw_kernel!(rmw_f32x2, f32x2, [Generic Global], add);
+    rmw_kernel!(rmw_f32x4, f32x4, [Generic Global], add);
 }
 
 /// Instantiates `atom_exch` (if `exch` is given) and `atom_cas` for `$ty`.

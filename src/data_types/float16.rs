@@ -11,8 +11,8 @@ use core::{
 };
 
 use super::{
-    array_from_fn,
-    vector::{Pairs, SupportedVectorLen, VectorLen, cast, half_vector, vector_element},
+    array_from_fn, f32x2, f32xN,
+    vector::{SupportedVectorLen, VectorLen, half_vector, vector_element},
 };
 
 /// Alias for the unstable primitive `f16`, which our `f16` type shadows at the module root.
@@ -735,11 +735,9 @@ where
 {
     /// Converts all elements to `f32`. This conversion is exact.
     #[inline(always)]
-    pub fn to_f32(self) -> Simd<f32, N> {
+    pub fn to_f32(self) -> f32xN<N> {
         let x2s = self.to_x2s();
-        let pairs: Pairs<[f32; 2], N> = array_from_fn(|i| x2s[i].pair_to_f32());
-        // SAFETY: the arrays have the same size and hold the same elements.
-        Simd::from_array(unsafe { cast(pairs) })
+        f32xN::from_x2s(array_from_fn(|i| f32x2::from_array(x2s[i].pair_to_f32())))
     }
 
     /// Converts `f32` values to `f16` using stochastic rounding.
@@ -758,12 +756,12 @@ where
     #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
     #[inline(always)]
     pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
-        x: Simd<f32, N>,
-        rbits: Pairs<u32, N>,
+        x: f32xN<N>,
+        rbits: crate::Pairs<u32, N>,
     ) -> Self {
-        let x = x.to_array();
+        let x = x.to_x2s();
         Self::from_x2s(array_from_fn(|i| {
-            f16x2::pair_from_f32_stochastic::<R, O>([x[2 * i], x[2 * i + 1]], rbits[i])
+            f16x2::pair_from_f32_stochastic::<R, O>(x[i].to_array(), rbits[i])
         }))
     }
 

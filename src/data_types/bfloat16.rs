@@ -7,11 +7,10 @@ use core::{
     fmt,
     mem::transmute,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
-    simd::Simd,
 };
 
 use super::{
-    array_from_fn,
+    array_from_fn, f32xN,
     vector::{SupportedVectorLen, VectorLen, half_vector, vector_element},
 };
 
@@ -558,7 +557,7 @@ where
 {
     /// Converts all elements to `f32`. This conversion is exact.
     #[inline(always)]
-    pub const fn to_f32(self) -> Simd<f32, N> {
+    pub const fn to_f32(self) -> f32xN<N> {
         let pairs = self.to_pair_bits();
         let mut out = [0.0f32; N];
         let mut i = 0;
@@ -568,7 +567,7 @@ where
             out[2 * i + 1] = f32::from_bits(pairs[i] & 0xFFFF_0000);
             i += 1;
         }
-        Simd::from_array(out)
+        f32xN::from_array(out)
     }
 
     /// Converts `f32` values to `bf16` using stochastic rounding.
@@ -587,12 +586,12 @@ where
     #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
     #[inline(always)]
     pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
-        x: Simd<f32, N>,
+        x: f32xN<N>,
         rbits: crate::Pairs<u32, N>,
     ) -> Self {
-        let x = x.to_array();
+        let x = x.to_x2s();
         Self::from_x2s(array_from_fn(|i| {
-            bf16x2::pair_from_f32_stochastic::<R, O>([x[2 * i], x[2 * i + 1]], rbits[i])
+            bf16x2::pair_from_f32_stochastic::<R, O>(x[i].to_array(), rbits[i])
         }))
     }
 

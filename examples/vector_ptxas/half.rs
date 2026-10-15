@@ -3,10 +3,9 @@
 //! horizontal reductions. The operations are generic functions over the length (`f16_fns` and
 //! `bf16_fns`), which the kernels instantiate once per width.
 
-use core::simd::Simd;
 use ptx_std::{
     Bits, Denormals, Half, NanHandling, Overflow, Relu, Rounding, Saturation, SupportedVectorLen,
-    Vector, VectorLen, XorSignAbs, bf16, f16,
+    Vector, VectorLen, XorSignAbs, bf16, f16, f32xN,
 };
 
 #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
@@ -36,9 +35,9 @@ macro_rules! half_shared {
     ($elem:ident) => {
         #[inline(always)]
         pub fn convert<const N: usize>(
-            x: Simd<f32, N>,
+            x: f32xN<N>,
             v: Vector<$elem, N>,
-        ) -> ([Vector<$elem, N>; 5], Simd<f32, N>)
+        ) -> ([Vector<$elem, N>; 5], f32xN<N>)
         where
             VectorLen<N>: SupportedVectorLen,
         {
@@ -73,7 +72,7 @@ macro_rules! half_shared {
         #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
         #[inline(always)]
         pub fn stochastic<const N: usize>(
-            x: Simd<f32, N>,
+            x: f32xN<N>,
             rbits: Pairs<u32, N>,
         ) -> [Vector<$elem, N>; 4]
         where
@@ -95,7 +94,7 @@ macro_rules! half_shared {
         pub fn broadcast<const N: usize>(
             v: Vector<$elem, N>,
             s: $elem,
-        ) -> ([Vector<$elem, N>; 7], Simd<f32, N>)
+        ) -> ([Vector<$elem, N>; 7], f32xN<N>)
         where
             VectorLen<N>: SupportedVectorLen,
         {
@@ -105,7 +104,7 @@ macro_rules! half_shared {
             acc *= s;
             (
                 [v + s, v - s, v * s, s + v, s - v, s * v, acc],
-                Simd::from(v),
+                f32xN::from(v),
             )
         }
 
@@ -129,10 +128,10 @@ macro_rules! half_kernels {
     ) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "ptx-kernel" fn $convert(
-            x: *const Simd<f32, $n>,
+            x: *const f32xN<$n>,
             v: *const Vector<$elem, $n>,
             out: *mut [Vector<$elem, $n>; 5],
-            out_f32: *mut Simd<f32, $n>,
+            out_f32: *mut f32xN<$n>,
         ) {
             unsafe { (*out, *out_f32) = $fns::convert::<$n>(*x, *v) }
         }
@@ -140,11 +139,11 @@ macro_rules! half_kernels {
         #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "ptx-kernel" fn $stochastic(
-            x: *const Simd<f32, $n>,
-            rbits: *const Simd<u32, { $n / 2 }>,
+            x: *const f32xN<$n>,
+            rbits: *const Pairs<u32, $n>,
             out: *mut [Vector<$elem, $n>; 4],
         ) {
-            unsafe { *out = $fns::stochastic::<$n>(*x, (*rbits).to_array()) }
+            unsafe { *out = $fns::stochastic::<$n>(*x, *rbits) }
         }
 
         #[unsafe(no_mangle)]
@@ -152,7 +151,7 @@ macro_rules! half_kernels {
             v: *const Vector<$elem, $n>,
             s: *const $elem,
             out: *mut [Vector<$elem, $n>; 7],
-            out_f32: *mut Simd<f32, $n>,
+            out_f32: *mut f32xN<$n>,
         ) {
             unsafe { (*out, *out_f32) = $fns::broadcast::<$n>(*v, *s) }
         }

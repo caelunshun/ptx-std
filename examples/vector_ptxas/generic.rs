@@ -3,14 +3,14 @@
 //! users write it: a function with a `const N: usize` parameter and the bound
 //! `VectorLen<N>: SupportedVectorLen`, instantiated by thin kernels for a couple of widths.
 
-use core::simd::Simd;
 use ptx_std::{
     F32Ext, SupportedVectorLen, Vector, VectorElement, VectorLen, bf16xN, f4e2m1, f8e4m3, f16xN,
+    f32xN,
 };
 
 /// Converts `f32` values to `bf16`, rounding to nearest, ties to even.
 #[inline(always)]
-fn f32_to_bf16<const N: usize>(x: Simd<f32, N>) -> bf16xN<N>
+fn f32_to_bf16<const N: usize>(x: f32xN<N>) -> bf16xN<N>
 where
     VectorLen<N>: SupportedVectorLen,
 {
@@ -33,7 +33,7 @@ unsafe fn sum_squares<const N: usize>(vectors: *const f16xN<N>, count: usize) ->
 where
     VectorLen<N>: SupportedVectorLen,
 {
-    let mut acc = Simd::<f32, N>::splat(0.0);
+    let mut acc = f32xN::<N>::ZERO;
     for i in 0..count {
         let x = unsafe { vectors.add(i).read() }.to_f32();
         acc += x * x;
@@ -45,7 +45,7 @@ where
 /// per pair of elements derived from `seed` (a multiplicative hash, not a quality generator).
 #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
 #[inline(always)]
-fn f32_to_bf16_stochastic<const N: usize>(x: Simd<f32, N>, seed: u32) -> bf16xN<N>
+fn f32_to_bf16_stochastic<const N: usize>(x: f32xN<N>, seed: u32) -> bf16xN<N>
 where
     VectorLen<N>: SupportedVectorLen,
 {
@@ -79,7 +79,7 @@ where
 macro_rules! kernels {
     ($n:literal: $convert:ident, $dot:ident, $sum_squares:ident, $stochastic:ident) => {
         #[unsafe(no_mangle)]
-        pub unsafe extern "ptx-kernel" fn $convert(x: *const Simd<f32, $n>, out: *mut bf16xN<$n>) {
+        pub unsafe extern "ptx-kernel" fn $convert(x: *const f32xN<$n>, out: *mut bf16xN<$n>) {
             unsafe { *out = f32_to_bf16(*x) }
         }
 
@@ -104,7 +104,7 @@ macro_rules! kernels {
         #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "ptx-kernel" fn $stochastic(
-            x: *const Simd<f32, $n>,
+            x: *const f32xN<$n>,
             seed: u32,
             out: *mut bf16xN<$n>,
         ) {

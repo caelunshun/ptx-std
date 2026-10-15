@@ -349,7 +349,7 @@ macro_rules! narrow_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[cfg($basic)]
             #[inline(always)]
-            pub fn from_f32<const RELU: crate::Relu>(x: ::core::simd::Simd<f32, N>) -> Self {
+            pub fn from_f32<const RELU: crate::Relu>(x: $crate::f32xN<N>) -> Self {
                 let x = x.to_array();
                 Self::from_x2s($crate::data_types::array_from_fn(|i| {
                     $x2::pair_from_f32::<RELU>([x[2 * i], x[2 * i + 1]])
@@ -419,7 +419,7 @@ macro_rules! narrow_cvt {
             #[doc = concat!("Available when `cfg(", stringify!($basic), ")` holds.")]
             #[cfg($basic)]
             #[inline(always)]
-            pub fn to_f32<const RELU: crate::Relu>(self) -> ::core::simd::Simd<f32, N> {
+            pub fn to_f32<const RELU: crate::Relu>(self) -> $crate::f32xN<N> {
                 self.to_f16::<RELU>().to_f32()
             }
 
@@ -489,7 +489,7 @@ macro_rules! narrow_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
             pub fn from_f32_stochastic<const RELU: crate::Relu>(
-                x: ::core::simd::Simd<f32, N>,
+                x: $crate::f32xN<N>,
                 rbits: $crate::Quads<u32, N>,
             ) -> Self {
                 let x = x.to_array();
@@ -555,7 +555,7 @@ macro_rules! narrow_cvt {
 
         #[cfg($basic)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>>
-            for ::core::simd::Simd<f32, N>
+            for $crate::f32xN<N>
         where
             $crate::VectorLen<N>: $crate::SupportedVectorLen,
         {
@@ -717,7 +717,7 @@ macro_rules! ue8m0_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
             pub fn from_f32<const RND: crate::Rounding, const OVERFLOW: crate::Overflow>(
-                x: ::core::simd::Simd<f32, N>,
+                x: $crate::f32xN<N>,
             ) -> Self {
                 let x = x.to_array();
                 Self::from_x2s($crate::data_types::array_from_fn(|i| {
@@ -766,7 +766,7 @@ macro_rules! ue8m0_cvt {
             /// Implemented as [`Self::to_bf16`] followed by the exact conversion of `bf16` to
             /// `f32`.
             #[inline(always)]
-            pub fn to_f32(self) -> ::core::simd::Simd<f32, N> {
+            pub fn to_f32(self) -> $crate::f32xN<N> {
                 self.to_bf16().to_f32()
             }
         }
@@ -803,7 +803,7 @@ macro_rules! ue8m0_cvt {
 
         #[cfg($cfg)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>>
-            for ::core::simd::Simd<f32, N>
+            for $crate::f32xN<N>
         where
             $crate::VectorLen<N>: $crate::SupportedVectorLen,
         {
@@ -1087,7 +1087,7 @@ macro_rules! s2f6_cvt {
             ///
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
-            pub fn from_f32<const RELU: crate::Relu>(x: ::core::simd::Simd<f32, N>) -> Self {
+            pub fn from_f32<const RELU: crate::Relu>(x: $crate::f32xN<N>) -> Self {
                 let x = x.to_array();
                 Self::from_x2s($crate::data_types::array_from_fn(|i| {
                     $x2::pair_from_f32::<RELU>([x[2 * i], x[2 * i + 1]])
@@ -1107,7 +1107,7 @@ macro_rules! s2f6_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
             pub fn from_f32_scaled<const RELU: crate::Relu>(
-                x: ::core::simd::Simd<f32, N>,
+                x: $crate::f32xN<N>,
                 scales: crate::f8e8m0xN<N>,
             ) -> Self {
                 let x = x.to_array();
@@ -1201,7 +1201,7 @@ macro_rules! s2f6_cvt {
             /// Implemented as [`Self::to_bf16`] followed by the exact conversion of `bf16` to
             /// `f32`.
             #[inline(always)]
-            pub fn to_f32<const RELU: crate::Relu>(self) -> ::core::simd::Simd<f32, N> {
+            pub fn to_f32<const RELU: crate::Relu>(self) -> $crate::f32xN<N> {
                 self.to_bf16::<RELU>().to_f32()
             }
         }
@@ -1238,7 +1238,7 @@ macro_rules! s2f6_cvt {
 
         #[cfg($cfg)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>>
-            for ::core::simd::Simd<f32, N>
+            for $crate::f32xN<N>
         where
             $crate::VectorLen<N>: $crate::SupportedVectorLen,
         {
