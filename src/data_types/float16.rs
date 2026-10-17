@@ -11,8 +11,8 @@ use core::{
 };
 
 use super::{
-    array_from_fn, f32x2, f32xN,
-    vector::{SupportedVectorLen, VectorLen, half_vector, vector_element},
+    f32x2, f32xN,
+    vector::{half_vector, vector_element},
 };
 
 /// Alias for the unstable primitive `f16`, which our `f16` type shadows at the module root.
@@ -541,7 +541,7 @@ impl MulAssign for f16 {
 }
 
 vector_element! {
-    elem: f16, pair: u32, packing: Bytes,
+    elem: f16, unit: u16, packing: Bytes,
     consts: [
         ZERO, NEG_ZERO, ONE, NEG_ONE, INFINITY, NEG_INFINITY, NAN, MAX, MIN, MIN_POSITIVE,
         MIN_POSITIVE_SUBNORMAL, EPSILON
@@ -729,15 +729,11 @@ impl f16x2 {
     }
 }
 
-impl<const N: usize> f16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> f16xN<N> {
     /// Converts all elements to `f32`. This conversion is exact.
     #[inline(always)]
     pub fn to_f32(self) -> f32xN<N> {
-        let x2s = self.to_x2s();
-        f32xN::from_x2s(array_from_fn(|i| f32x2::from_array(x2s[i].pair_to_f32())))
+        f32xN::from_pairs_with(|i| f32x2::from_array(self.pair(i).pair_to_f32()))
     }
 
     /// Converts `f32` values to `f16` using stochastic rounding.
@@ -747,8 +743,10 @@ where
     /// mantissa bits discarded by the conversion. `rbits[i]` supplies the random bits of the pair
     /// formed by elements `2 * i` and `2 * i + 1`: the 13 least significant bits of its upper half
     /// are used for the odd element and those of its lower half for the even element; the
-    /// remaining bits are ignored. `R` optionally clamps negative results to zero. `O` selects
-    /// whether out-of-range results become infinity or are clamped to the finite range of `f16`.
+    /// remaining bits are ignored. For an odd `N`, the last pair is made of the last element
+    /// alone, and only the lower half of its `rbits` is used. `R` optionally clamps negative
+    /// results to zero. `O` selects whether out-of-range results become infinity or are clamped
+    /// to the finite range of `f16`.
     ///
     /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
     ///
@@ -758,11 +756,13 @@ where
     pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
         x: f32xN<N>,
         rbits: crate::Pairs<u32, N>,
-    ) -> Self {
-        let x = x.to_x2s();
-        Self::from_x2s(array_from_fn(|i| {
-            f16x2::pair_from_f32_stochastic::<R, O>(x[i].to_array(), rbits[i])
-        }))
+    ) -> Self
+    where
+        crate::VectorLen<N>: crate::SupportedVectorLen,
+    {
+        Self::from_pairs_with(|i| {
+            f16x2::pair_from_f32_stochastic::<R, O>(x.pair(i).to_array(), rbits[i])
+        })
     }
 
     /// Computes the absolute value of each element. A NaN input yields an unspecified NaN.
@@ -856,10 +856,7 @@ where
                 "ClampToUnit saturation and Relu cannot be combined"
             );
         }
-        let (a, b, c) = (self.to_x2s(), b.to_x2s(), c.to_x2s());
-        Self::from_x2s(array_from_fn(|i| {
-            a[i].pair_mul_add_with::<D, S, R>(b[i], c[i])
-        }))
+        self.zip3_pairs(b, c, |a, b, c| a.pair_mul_add_with::<D, S, R>(b, c))
     }
 
     /// Element-wise fused multiply-add with the out-of-bounds (OOB) modifier.
@@ -877,8 +874,7 @@ where
     #[cfg(target_feature = "sm_90")]
     #[inline(always)]
     pub fn mul_add_oob<const R: Relu>(self, b: Self, c: Self) -> Self {
-        let (a, b, c) = (self.to_x2s(), b.to_x2s(), c.to_x2s());
-        Self::from_x2s(array_from_fn(|i| a[i].pair_mul_add_oob::<R>(b[i], c[i])))
+        self.zip3_pairs(b, c, |a, b, c| a.pair_mul_add_oob::<R>(b, c))
     }
 
     /// Computes `2^x` of each element, approximately (`ex2.approx.f16x2`).
@@ -1002,24 +998,16 @@ where
     /// [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
     ///
     /// The elements are combined with `min` instructions in a tree, using `min.f16x2` on pairs
-    /// until a single pair remains.
+    /// until a single pair remains, whose two elements are combined with the scalar instruction,
+    /// and then the last element of a vector of odd length.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline(always)]
     pub fn reduce_min_with<const D: Denormals, const NAN: NanHandling>(self) -> f16 {
-        let mut acc = self.to_x2s();
-        let mut n = acc.len();
-        #[rustc_unroll(full)]
-        while n > 1 {
-            n /= 2;
-            #[rustc_unroll(full)]
-            for i in 0..n {
-                acc[i] = acc[i].pair_min_with::<D, NAN, { XorSignAbs::Disabled }>(acc[i + n]);
-            }
-        }
-        acc[0]
-            .lo()
-            .min_with::<D, NAN, { XorSignAbs::Disabled }>(acc[0].hi())
+        self.reduce_pairs(
+            |a, b| a.pair_min_with::<D, NAN, { XorSignAbs::Disabled }>(b),
+            |a, b| a.min_with::<D, NAN, { XorSignAbs::Disabled }>(b),
+        )
     }
 
     /// Returns the maximum element with explicit modifiers.
@@ -1030,31 +1018,20 @@ where
     /// NaN), [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
     ///
     /// The elements are combined with `max` instructions in a tree, using `max.f16x2` on pairs
-    /// until a single pair remains.
+    /// until a single pair remains, whose two elements are combined with the scalar instruction,
+    /// and then the last element of a vector of odd length.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline(always)]
     pub fn reduce_max_with<const D: Denormals, const NAN: NanHandling>(self) -> f16 {
-        let mut acc = self.to_x2s();
-        let mut n = acc.len();
-        #[rustc_unroll(full)]
-        while n > 1 {
-            n /= 2;
-            #[rustc_unroll(full)]
-            for i in 0..n {
-                acc[i] = acc[i].pair_max_with::<D, NAN, { XorSignAbs::Disabled }>(acc[i + n]);
-            }
-        }
-        acc[0]
-            .lo()
-            .max_with::<D, NAN, { XorSignAbs::Disabled }>(acc[0].hi())
+        self.reduce_pairs(
+            |a, b| a.pair_max_with::<D, NAN, { XorSignAbs::Disabled }>(b),
+            |a, b| a.max_with::<D, NAN, { XorSignAbs::Disabled }>(b),
+        )
     }
 }
 
-impl<const N: usize> Add for f16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Add for f16xN<N> {
     type Output = Self;
 
     #[inline(always)]
@@ -1063,10 +1040,7 @@ where
     }
 }
 
-impl<const N: usize> Sub for f16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Sub for f16xN<N> {
     type Output = Self;
 
     #[inline(always)]
@@ -1075,10 +1049,7 @@ where
     }
 }
 
-impl<const N: usize> Mul for f16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Mul for f16xN<N> {
     type Output = Self;
 
     #[inline(always)]
@@ -1087,10 +1058,7 @@ where
     }
 }
 
-impl<const N: usize> Neg for f16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Neg for f16xN<N> {
     type Output = Self;
 
     #[inline(always)]

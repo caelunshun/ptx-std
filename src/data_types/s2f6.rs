@@ -1,6 +1,5 @@
 // --- LLM-generated --- //
-//! The `s2f6` fixed-point format, as a scalar and packed vectors of 2, 4, 8, 16, 32 and 64
-//! elements.
+//! The `s2f6` fixed-point format, as a scalar and packed vectors of any length from 1 to 64.
 
 // Only used by the conversions, which are gated on newer architectures.
 #[allow(unused_imports)]
@@ -38,7 +37,7 @@ narrow_scalar! {
 }
 
 vector_element! {
-    elem: s2f6, pair: u16, packing: Bytes,
+    elem: s2f6, unit: u8, packing: Bytes,
     consts: [ZERO, ONE, NEG_ONE, MAX, MIN, MIN_POSITIVE],
     note: "See [`s2f6`](crate::s2f6) for the format.",
     aliases: s2f6xN, s2f6x2, s2f6x4, s2f6x8, s2f6x16, s2f6x32, s2f6x64,

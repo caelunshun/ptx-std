@@ -4,10 +4,7 @@ use core::{
     simd::{Simd, SimdElement},
 };
 
-use crate::{
-    Denormals, NanHandling, Overflow, Relu, Rounding, Saturation, SupportedVectorLen, VectorLen,
-    XorSignAbs, f32xN,
-};
+use crate::{Denormals, NanHandling, Overflow, Relu, Rounding, Saturation, XorSignAbs, f32xN};
 
 /// Rejects the rounding modes that are not IEEE 754 rounding modes at compile time.
 pub(crate) const fn assert_ieee_rounding(rnd: Rounding) {
@@ -735,30 +732,21 @@ impl F32Ext for f32 {
 
 /// Applies `f` to every element of `a`.
 #[inline(always)]
-fn map1<const N: usize>(a: f32xN<N>, f: impl Fn(f32) -> f32) -> f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+fn map1<const N: usize>(a: f32xN<N>, f: impl Fn(f32) -> f32) -> f32xN<N> {
     let a = a.to_array();
     f32xN::from_array(crate::data_types::array_from_fn(|i| f(a[i])))
 }
 
 /// Converts every element of `a` with `f`.
 #[inline(always)]
-fn convert<const N: usize, R: SimdElement>(a: f32xN<N>, f: impl Fn(f32) -> R) -> Simd<R, N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+fn convert<const N: usize, R: SimdElement>(a: f32xN<N>, f: impl Fn(f32) -> R) -> Simd<R, N> {
     let a = a.to_array();
     Simd::from_array(crate::data_types::array_from_fn(|i| f(a[i])))
 }
 
 /// Applies `f` to every pair of elements of `a` and `b`.
 #[inline(always)]
-fn map2<const N: usize>(a: f32xN<N>, b: f32xN<N>, f: impl Fn(f32, f32) -> f32) -> f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+fn map2<const N: usize>(a: f32xN<N>, b: f32xN<N>, f: impl Fn(f32, f32) -> f32) -> f32xN<N> {
     let (a, b) = (a.to_array(), b.to_array());
     f32xN::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i])))
 }
@@ -770,17 +758,14 @@ fn map3<const N: usize>(
     b: f32xN<N>,
     c: f32xN<N>,
     f: impl Fn(f32, f32, f32) -> f32,
-) -> f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+) -> f32xN<N> {
     let (a, b, c) = (a.to_array(), b.to_array(), c.to_array());
     f32xN::from_array(crate::data_types::array_from_fn(|i| f(a[i], b[i], c[i])))
 }
 
-/// Reduces the elements of `x` (an even number) to a single value. Elements `2 * i` and
-/// `2 * i + 1` form pair `i`; the pairs are combined element-wise with `pair_op` in a tree, and
-/// the two elements of the final pair with `op`.
+/// Reduces the elements of `x` to a single value. Elements `2 * i` and `2 * i + 1` form pair `i`;
+/// the pairs are combined element-wise with `pair_op` in a tree, the two elements of the final pair
+/// with `op`, and then the last element of an odd number of elements, again with `op`.
 ///
 /// The pairs are kept in `x`, used as a ring buffer of `N / 2` pairs holding a FIFO queue: step
 /// `k` pops the pairs at queue positions `2 * k` and `2 * k + 1` and pushes their combination at
@@ -791,6 +776,9 @@ fn reduce_pairs<const N: usize>(
     pair_op: impl Fn([f32; 2], [f32; 2]) -> [f32; 2],
     op: impl Fn(f32, f32) -> f32,
 ) -> f32 {
+    if const { N == 1 } {
+        return x[0];
+    }
     let p = N / 2;
     #[rustc_unroll(full)]
     for k in 0..p - 1 {
@@ -798,7 +786,12 @@ fn reduce_pairs<const N: usize>(
         [x[2 * k], x[2 * k + 1]] = pair_op([x[2 * a], x[2 * a + 1]], [x[2 * b], x[2 * b + 1]]);
     }
     let last = (2 * p - 2) % p;
-    op(x[2 * last], x[2 * last + 1])
+    let reduced = op(x[2 * last], x[2 * last + 1]);
+    if const { N % 2 == 1 } {
+        op(reduced, x[N - 1])
+    } else {
+        reduced
+    }
 }
 
 /// Reduces the elements of `x` to a single value, combining three values per step with `op3`, and
@@ -880,7 +873,7 @@ mod minmax3 {
 #[cfg(target_feature = "sm_100")]
 mod packed {
     use super::*;
-    use crate::f32x2;
+    use crate::{data_types::f32_pair, f32x2};
 
     /// Emits `$op` on pairs of elements. The pairs are packed into `.b64` registers and unpacked
     /// again inside the assembly block, with `mov.b64`.
@@ -969,13 +962,9 @@ mod packed {
         a: f32xN<N>,
         b: f32xN<N>,
         packed: impl Fn([f32; 2], [f32; 2]) -> [f32; 2],
-    ) -> f32xN<N>
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
-        a.zip_pairs(b, |a, b| {
-            f32x2::from_array(packed(a.to_array(), b.to_array()))
-        })
+    ) -> f32xN<N> {
+        let (a, b) = (a.to_array(), b.to_array());
+        f32xN::from_pairs_with(|i| f32x2::from_array(packed(f32_pair(&a, i), f32_pair(&b, i))))
     }
 
     /// Applies `packed` to every pair of elements of `a`, `b` and `c`.
@@ -985,21 +974,15 @@ mod packed {
         b: f32xN<N>,
         c: f32xN<N>,
         packed: impl Fn([f32; 2], [f32; 2], [f32; 2]) -> [f32; 2],
-    ) -> f32xN<N>
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
-        let (a, b, c) = (a.to_x2s(), b.to_x2s(), c.to_x2s());
-        f32xN::from_x2s(crate::data_types::array_from_fn(|i| {
-            f32x2::from_array(packed(a[i].to_array(), b[i].to_array(), c[i].to_array()))
-        }))
+    ) -> f32xN<N> {
+        let (a, b, c) = (a.to_array(), b.to_array(), c.to_array());
+        f32xN::from_pairs_with(|i| {
+            f32x2::from_array(packed(f32_pair(&a, i), f32_pair(&b, i), f32_pair(&c, i)))
+        })
     }
 }
 
-impl<const N: usize> F32Ext for f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> F32Ext for f32xN<N> {
     type I32 = Simd<i32, N>;
     type U32 = Simd<u32, N>;
     type I64 = Simd<i64, N>;

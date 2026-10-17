@@ -7,9 +7,13 @@
 //!
 //! - the `pair_*` methods call the `core::arch::nvptx` intrinsics (or inline PTX) directly;
 //! - the scalars use the pair instruction with the other lane set to zero and keep lane 0;
-//! - the public methods of `Vector<E, N>` apply the pair conversion to each pair of elements. The
-//!   stochastic-rounding conversions operate on four values instead and apply the four-element
-//!   instruction to each group of four, so they require `VectorLen<N>: QuadVectorLen`.
+//! - the public methods of `Vector<E, N>` apply the pair conversion to each pair of elements, for
+//!   every length from 1 to 64 (for FP4, every even length). The last pair of an odd length holds
+//!   one element and a zero lane whose result is discarded. The stochastic-rounding conversions
+//!   operate on four values instead and apply the four-element instruction to each group of four
+//!   (the last group is zero-padded if `N` is not a multiple of four), taking one word of random
+//!   bits per group in a [`Quads<u32, N>`](crate::Quads) array, which needs the bound
+//!   `VectorLen<N>: SupportedVectorLen` for generic `N`.
 //!
 //! All packed narrow types use the same element order: element 0 occupies the least significant
 //! bits. The `cvt` instructions instead place their first operand `a` in the *upper* half of the
@@ -334,7 +338,7 @@ macro_rules! narrow_cvt {
     ) => {
         impl<const N: usize> $crate::Vector<$scalar, N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[doc = concat!("Converts `f32` values to ", $name, " values, rounding to nearest even.")]
             ///
@@ -351,9 +355,9 @@ macro_rules! narrow_cvt {
             #[inline(always)]
             pub fn from_f32<const RELU: crate::Relu>(x: $crate::f32xN<N>) -> Self {
                 let x = x.to_array();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $x2::pair_from_f32::<RELU>([x[2 * i], x[2 * i + 1]])
-                }))
+                Self::from_pairs_with(|i| {
+                    $x2::pair_from_f32::<RELU>($crate::data_types::f32_pair(&x, i))
+                })
             }
 
             #[doc = concat!("Converts `f16` values to ", $name, " values, rounding to nearest even.")]
@@ -370,8 +374,7 @@ macro_rules! narrow_cvt {
             #[cfg($from_f16)]
             #[inline(always)]
             pub fn from_f16<const RELU: crate::Relu>(x: crate::f16xN<N>) -> Self {
-                let x = x.to_x2s();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| $x2::pair_from_f16::<RELU>(x[i])))
+                Self::from_pairs_with(|i| $x2::pair_from_f16::<RELU>(x.pair(i)))
             }
 
             #[doc = concat!("Converts `bf16` values to ", $name, " values, rounding to nearest even.")]
@@ -388,8 +391,7 @@ macro_rules! narrow_cvt {
             #[cfg($newer)]
             #[inline(always)]
             pub fn from_bf16<const RELU: crate::Relu>(x: crate::bf16xN<N>) -> Self {
-                let x = x.to_x2s();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| $x2::pair_from_bf16::<RELU>(x[i])))
+                Self::from_pairs_with(|i| $x2::pair_from_bf16::<RELU>(x.pair(i)))
             }
 
             #[doc = concat!("Converts the ", $name, " values to `f16` values.")]
@@ -405,8 +407,7 @@ macro_rules! narrow_cvt {
             #[cfg($basic)]
             #[inline(always)]
             pub fn to_f16<const RELU: crate::Relu>(self) -> crate::f16xN<N> {
-                let x = self.to_x2s();
-                crate::f16xN::<N>::from_x2s($crate::data_types::array_from_fn(|i| x[i].pair_to_f16::<RELU>()))
+                crate::f16xN::<N>::from_pairs_with(|i| self.pair(i).pair_to_f16::<RELU>())
             }
 
             #[doc = concat!("Converts the ", $name, " values to `f32` values.")]
@@ -437,8 +438,7 @@ macro_rules! narrow_cvt {
             #[cfg($newer)]
             #[inline(always)]
             pub fn to_bf16<const RELU: crate::Relu>(self) -> crate::bf16xN<N> {
-                let x = self.to_x2s();
-                crate::bf16xN::<N>::from_x2s($crate::data_types::array_from_fn(|i| x[i].pair_to_bf16::<RELU>()))
+                crate::bf16xN::<N>::from_pairs_with(|i| self.pair(i).pair_to_bf16::<RELU>())
             }
 
             #[doc = concat!("Converts the ", $name, " values to `bf16` values, multiplying each element by its `ue8m0` scale factor.")]
@@ -459,11 +459,9 @@ macro_rules! narrow_cvt {
                 self,
                 scales: crate::f8e8m0xN<N>,
             ) -> crate::bf16xN<N> {
-                let x = self.to_x2s();
-                let scales = scales.to_x2s();
-                crate::bf16xN::<N>::from_x2s($crate::data_types::array_from_fn(|i| {
-                    x[i].pair_to_bf16_scaled::<RELU, OVERFLOW>(scales[i])
-                }))
+                crate::bf16xN::<N>::from_pairs_with(|i| {
+                    self.pair(i).pair_to_bf16_scaled::<RELU, OVERFLOW>(scales.pair(i))
+                })
             }
         }
 
@@ -471,16 +469,21 @@ macro_rules! narrow_cvt {
         #[cfg($stochastic)]
         impl<const N: usize> $crate::Vector<$scalar, N>
         where
-            $crate::VectorLen<N>: $crate::QuadVectorLen,
+            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[doc = concat!("Converts `f32` values to ", $name, " values with stochastic rounding (`.rs`).")]
             ///
             /// Element `i` of the result is converted from element `i` of `x`. Each value is
             /// rounded towards or away from zero depending on the carry out of adding its random
             /// bits to the discarded mantissa bits. The elements `4 * g` to `4 * g + 3` are
-            /// converted together using the random bits `rbits[g]`; within that group, the
-            /// elements are numbered from 0:
+            /// converted together by one instruction using the random bits `rbits[g]`; within
+            /// that group, the elements are numbered from 0:
             #[doc = $rbits]
+            ///
+            /// If `N` is not a multiple of four, the last group holds fewer than four elements:
+            /// it is padded with zeros and the padding results are dropped, so the random bits
+            /// assigned to the padding elements have no effect.
             ///
             #[doc = narrow_cvt!(@doc down)]
             ///
@@ -493,14 +496,12 @@ macro_rules! narrow_cvt {
                 rbits: $crate::Quads<u32, N>,
             ) -> Self {
                 let x = x.to_array();
-                let quads: $crate::Quads<$x4, N> = $crate::data_types::array_from_fn(|i| {
+                Self::from_quads_with(|i| {
                     $x4::quad_from_f32_stochastic::<RELU>(
-                        [x[4 * i], x[4 * i + 1], x[4 * i + 2], x[4 * i + 3]],
+                        $crate::data_types::f32_quad(&x, i),
                         rbits[i],
                     )
-                });
-                // SAFETY: both arrays hold the pairs of the result, in order.
-                Self::from_pair_bits(unsafe { $crate::data_types::vector::cast(quads) })
+                })
             }
         }
     };
@@ -534,7 +535,7 @@ macro_rules! narrow_cvt {
         #[cfg($basic)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>> for crate::f16xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {
@@ -545,7 +546,7 @@ macro_rules! narrow_cvt {
         #[cfg($newer)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>> for crate::bf16xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {
@@ -557,7 +558,7 @@ macro_rules! narrow_cvt {
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>>
             for $crate::f32xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {
@@ -704,7 +705,7 @@ macro_rules! ue8m0_cvt {
         #[cfg($cfg)]
         impl<const N: usize> $crate::Vector<$scalar, N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             /// Converts `f32` values to `ue8m0` scale factors.
             ///
@@ -720,9 +721,9 @@ macro_rules! ue8m0_cvt {
                 x: $crate::f32xN<N>,
             ) -> Self {
                 let x = x.to_array();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $x2::pair_from_f32::<RND, OVERFLOW>([x[2 * i], x[2 * i + 1]])
-                }))
+                Self::from_pairs_with(|i| {
+                    $x2::pair_from_f32::<RND, OVERFLOW>($crate::data_types::f32_pair(&x, i))
+                })
             }
 
             /// Converts `bf16` values to `ue8m0` scale factors.
@@ -738,10 +739,7 @@ macro_rules! ue8m0_cvt {
             pub fn from_bf16<const RND: crate::Rounding, const OVERFLOW: crate::Overflow>(
                 x: crate::bf16xN<N>,
             ) -> Self {
-                let x = x.to_x2s();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $x2::pair_from_bf16::<RND, OVERFLOW>(x[i])
-                }))
+                Self::from_pairs_with(|i| $x2::pair_from_bf16::<RND, OVERFLOW>(x.pair(i)))
             }
 
             /// Converts the `ue8m0` scale factors to `bf16` values.
@@ -754,8 +752,7 @@ macro_rules! ue8m0_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
             pub fn to_bf16(self) -> crate::bf16xN<N> {
-                let x = self.to_x2s();
-                crate::bf16xN::<N>::from_x2s($crate::data_types::array_from_fn(|i| x[i].pair_to_bf16()))
+                crate::bf16xN::<N>::from_pairs_with(|i| self.pair(i).pair_to_bf16())
             }
 
             /// Converts the `ue8m0` scale factors to `f32` values.
@@ -793,7 +790,7 @@ macro_rules! ue8m0_cvt {
         #[cfg($cfg)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>> for crate::bf16xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {
@@ -805,7 +802,7 @@ macro_rules! ue8m0_cvt {
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>>
             for $crate::f32xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {
@@ -1075,7 +1072,7 @@ macro_rules! s2f6_cvt {
         #[cfg($cfg)]
         impl<const N: usize> $crate::Vector<$scalar, N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             /// Converts `f32` values to `s2f6` values.
             ///
@@ -1089,9 +1086,9 @@ macro_rules! s2f6_cvt {
             #[inline(always)]
             pub fn from_f32<const RELU: crate::Relu>(x: $crate::f32xN<N>) -> Self {
                 let x = x.to_array();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $x2::pair_from_f32::<RELU>([x[2 * i], x[2 * i + 1]])
-                }))
+                Self::from_pairs_with(|i| {
+                    $x2::pair_from_f32::<RELU>($crate::data_types::f32_pair(&x, i))
+                })
             }
 
             /// Converts `f32` values to `s2f6` values, dividing each by its `ue8m0` scale factor
@@ -1111,10 +1108,12 @@ macro_rules! s2f6_cvt {
                 scales: crate::f8e8m0xN<N>,
             ) -> Self {
                 let x = x.to_array();
-                let scales = scales.to_x2s();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $x2::pair_from_f32_scaled::<RELU>([x[2 * i], x[2 * i + 1]], scales[i])
-                }))
+                Self::from_pairs_with(|i| {
+                    $x2::pair_from_f32_scaled::<RELU>(
+                        $crate::data_types::f32_pair(&x, i),
+                        scales.pair(i),
+                    )
+                })
             }
 
             /// Converts `bf16` values to `s2f6` values.
@@ -1128,8 +1127,7 @@ macro_rules! s2f6_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
             pub fn from_bf16<const RELU: crate::Relu>(x: crate::bf16xN<N>) -> Self {
-                let x = x.to_x2s();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| $x2::pair_from_bf16::<RELU>(x[i])))
+                Self::from_pairs_with(|i| $x2::pair_from_bf16::<RELU>(x.pair(i)))
             }
 
             /// Converts `bf16` values to `s2f6` values, dividing each by its `ue8m0` scale factor
@@ -1148,11 +1146,9 @@ macro_rules! s2f6_cvt {
                 x: crate::bf16xN<N>,
                 scales: crate::f8e8m0xN<N>,
             ) -> Self {
-                let x = x.to_x2s();
-                let scales = scales.to_x2s();
-                Self::from_x2s($crate::data_types::array_from_fn(|i| {
-                    $x2::pair_from_bf16_scaled::<RELU>(x[i], scales[i])
-                }))
+                Self::from_pairs_with(|i| {
+                    $x2::pair_from_bf16_scaled::<RELU>(x.pair(i), scales.pair(i))
+                })
             }
 
             /// Converts the `s2f6` values to `bf16` values.
@@ -1166,8 +1162,7 @@ macro_rules! s2f6_cvt {
             /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt>
             #[inline(always)]
             pub fn to_bf16<const RELU: crate::Relu>(self) -> crate::bf16xN<N> {
-                let x = self.to_x2s();
-                crate::bf16xN::<N>::from_x2s($crate::data_types::array_from_fn(|i| x[i].pair_to_bf16::<RELU>()))
+                crate::bf16xN::<N>::from_pairs_with(|i| self.pair(i).pair_to_bf16::<RELU>())
             }
 
             /// Converts the `s2f6` values to `bf16` values, multiplying each element by its
@@ -1186,11 +1181,9 @@ macro_rules! s2f6_cvt {
                 self,
                 scales: crate::f8e8m0xN<N>,
             ) -> crate::bf16xN<N> {
-                let x = self.to_x2s();
-                let scales = scales.to_x2s();
-                crate::bf16xN::<N>::from_x2s($crate::data_types::array_from_fn(|i| {
-                    x[i].pair_to_bf16_scaled::<RELU, OVERFLOW>(scales[i])
-                }))
+                crate::bf16xN::<N>::from_pairs_with(|i| {
+                    self.pair(i).pair_to_bf16_scaled::<RELU, OVERFLOW>(scales.pair(i))
+                })
             }
 
             /// Converts the `s2f6` values to `f32` values.
@@ -1228,7 +1221,7 @@ macro_rules! s2f6_cvt {
         #[cfg($cfg)]
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>> for crate::bf16xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {
@@ -1240,7 +1233,7 @@ macro_rules! s2f6_cvt {
         impl<const N: usize> ::core::convert::From<$crate::Vector<$scalar, N>>
             for $crate::f32xN<N>
         where
-            $crate::VectorLen<N>: $crate::SupportedVectorLen,
+            $scalar: $crate::VectorElement<N>,
         {
             #[inline(always)]
             fn from(x: $crate::Vector<$scalar, N>) -> Self {

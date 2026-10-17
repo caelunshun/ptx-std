@@ -5,20 +5,17 @@ use core::{
     simd::Simd,
 };
 
-use super::vector::{SupportedVectorLen, VectorLen, broadcast_ops, vector_element};
+use super::vector::{broadcast_ops, vector_element};
 
 vector_element! {
-    elem: f32, name: "`f32`", pair: u64, packing: Bytes,
+    elem: f32, name: "`f32`", unit: u32, packing: Bytes,
     consts: [],
     note: "Arithmetic operators act element-wise like those of `f32`: they round to nearest, ties to even, and preserve subnormal values. [`F32Ext`](crate::F32Ext) provides the other operations and the instruction modifiers. `From` converts to and from `core::simd::Simd<f32, N>`.",
     eq: elementwise,
     aliases: f32xN, f32x2, f32x4, f32x8, f32x16, f32x32, f32x64,
 }
 
-impl<const N: usize> f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> f32xN<N> {
     /// All elements positive zero.
     pub const ZERO: Self = Self::splat(0.0);
     /// All elements negative zero.
@@ -92,20 +89,14 @@ where
     }
 }
 
-impl<const N: usize> From<Simd<f32, N>> for f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> From<Simd<f32, N>> for f32xN<N> {
     #[inline(always)]
     fn from(x: Simd<f32, N>) -> Self {
         Self::from_array(x.to_array())
     }
 }
 
-impl<const N: usize> From<f32xN<N>> for Simd<f32, N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> From<f32xN<N>> for Simd<f32, N> {
     #[inline(always)]
     fn from(x: f32xN<N>) -> Self {
         Simd::from_array(x.to_array())
@@ -117,10 +108,7 @@ where
 /// `sm_100` and later).
 macro_rules! simd_ops {
     ($($op:ident $method:ident),*) => {$(
-        impl<const N: usize> $op for f32xN<N>
-        where
-            VectorLen<N>: SupportedVectorLen,
-        {
+        impl<const N: usize> $op for f32xN<N> {
             type Output = Self;
 
             #[inline(always)]
@@ -133,10 +121,7 @@ macro_rules! simd_ops {
 
 simd_ops!(Add add, Sub sub, Mul mul, Div div);
 
-impl<const N: usize> Neg for f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Neg for f32xN<N> {
     type Output = Self;
 
     #[inline(always)]

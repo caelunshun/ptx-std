@@ -10,8 +10,8 @@ use core::{
 };
 
 use super::{
-    array_from_fn, f32xN,
-    vector::{SupportedVectorLen, VectorLen, half_vector, vector_element},
+    f32xN,
+    vector::{half_vector, vector_element},
 };
 
 /// bfloat16 float (8 exponent bits, 7 mantissa bits).
@@ -417,7 +417,7 @@ impl MulAssign for bf16 {
 }
 
 vector_element! {
-    elem: bf16, pair: u32, packing: Bytes,
+    elem: bf16, unit: u16, packing: Bytes,
     consts: [
         ZERO, NEG_ZERO, ONE, NEG_ONE, INFINITY, NEG_INFINITY, NAN, MAX, MIN, MIN_POSITIVE, EPSILON
     ],
@@ -551,20 +551,19 @@ impl bf16x2 {
     }
 }
 
-impl<const N: usize> bf16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> bf16xN<N> {
     /// Converts all elements to `f32`. This conversion is exact.
     #[inline(always)]
     pub const fn to_f32(self) -> f32xN<N> {
-        let pairs = self.to_pair_bits();
         let mut out = [0.0f32; N];
         let mut i = 0;
         #[rustc_unroll(full)]
-        while i < pairs.len() {
-            out[2 * i] = f32::from_bits(pairs[i] << 16);
-            out[2 * i + 1] = f32::from_bits(pairs[i] & 0xFFFF_0000);
+        while i < Self::PAIRS {
+            let pair = self.pair_bits(i);
+            out[2 * i] = f32::from_bits(pair << 16);
+            if 2 * i + 1 < N {
+                out[2 * i + 1] = f32::from_bits(pair & 0xFFFF_0000);
+            }
             i += 1;
         }
         f32xN::from_array(out)
@@ -576,9 +575,10 @@ where
     /// towards or away from zero depending on the carry out of adding the random bits to the
     /// mantissa bits discarded by the conversion. `rbits[i]` supplies the random bits of the pair
     /// formed by elements `2 * i` and `2 * i + 1`: the upper 16 bits of its word are used for the
-    /// odd element and the lower 16 bits for the even element. `R` optionally clamps negative
-    /// results to zero. `O` selects whether out-of-range results become infinity or are clamped
-    /// to the finite range of `bf16`.
+    /// odd element and the lower 16 bits for the even element. For an odd `N`, the last pair is
+    /// made of the last element alone, and only the lower 16 bits of its `rbits` are used. `R`
+    /// optionally clamps negative results to zero. `O` selects whether out-of-range results
+    /// become infinity or are clamped to the finite range of `bf16`.
     ///
     /// Requires `sm_100a` or `sm_103a` (`sm_107a` is also supported by the PTX ISA).
     ///
@@ -588,11 +588,13 @@ where
     pub fn from_f32_stochastic<const R: Relu, const O: Overflow>(
         x: f32xN<N>,
         rbits: crate::Pairs<u32, N>,
-    ) -> Self {
-        let x = x.to_x2s();
-        Self::from_x2s(array_from_fn(|i| {
-            bf16x2::pair_from_f32_stochastic::<R, O>(x[i].to_array(), rbits[i])
-        }))
+    ) -> Self
+    where
+        crate::VectorLen<N>: crate::SupportedVectorLen,
+    {
+        Self::from_pairs_with(|i| {
+            bf16x2::pair_from_f32_stochastic::<R, O>(x.pair(i).to_array(), rbits[i])
+        })
     }
 
     /// Computes the absolute value of each element by clearing the sign bits.
@@ -600,14 +602,14 @@ where
     /// Unlike PTX `abs.bf16x2`, this preserves NaN payloads.
     #[inline(always)]
     pub const fn abs(self) -> Self {
-        let mut pairs = self.to_pair_bits();
+        let mut out = self;
         let mut i = 0;
         #[rustc_unroll(full)]
-        while i < pairs.len() {
-            pairs[i] &= 0x7FFF_7FFF;
+        while i < Self::PAIRS {
+            out.set_pair_bits(i, self.pair_bits(i) & 0x7FFF_7FFF);
             i += 1;
         }
-        Self::from_pair_bits(pairs)
+        out
     }
 
     /// Element-wise fused multiply-add: computes `self * b + c` with a single rounding (to
@@ -625,8 +627,7 @@ where
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-fma>
     #[inline(always)]
     pub fn mul_add_with<const R: Relu>(self, b: Self, c: Self) -> Self {
-        let (a, b, c) = (self.to_x2s(), b.to_x2s(), c.to_x2s());
-        Self::from_x2s(array_from_fn(|i| a[i].pair_mul_add_with::<R>(b[i], c[i])))
+        self.zip3_pairs(b, c, |a, b, c| a.pair_mul_add_with::<R>(b, c))
     }
 
     /// Returns the element-wise minimum. If exactly one input element is NaN, the other is
@@ -714,24 +715,16 @@ where
     /// NaN), [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
     ///
     /// The elements are combined with `min` instructions in a tree, using `min.bf16x2` on pairs
-    /// until a single pair remains.
+    /// until a single pair remains, whose two elements are combined with the scalar instruction,
+    /// and then the last element of a vector of odd length.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-min>
     #[inline(always)]
     pub fn reduce_min_with<const NAN: NanHandling>(self) -> bf16 {
-        let mut acc = self.to_x2s();
-        let mut n = acc.len();
-        #[rustc_unroll(full)]
-        while n > 1 {
-            n /= 2;
-            #[rustc_unroll(full)]
-            for i in 0..n {
-                acc[i] = acc[i].pair_min_with::<NAN, { XorSignAbs::Disabled }>(acc[i + n]);
-            }
-        }
-        acc[0]
-            .lo()
-            .min_with::<NAN, { XorSignAbs::Disabled }>(acc[0].hi())
+        self.reduce_pairs(
+            |a, b| a.pair_min_with::<NAN, { XorSignAbs::Disabled }>(b),
+            |a, b| a.min_with::<NAN, { XorSignAbs::Disabled }>(b),
+        )
     }
 
     /// Returns the maximum element with explicit NaN handling.
@@ -741,32 +734,21 @@ where
     /// NaN), [`NanHandling::Propagate`] yields a canonical NaN if any element is NaN.
     ///
     /// The elements are combined with `max` instructions in a tree, using `max.bf16x2` on pairs
-    /// until a single pair remains.
+    /// until a single pair remains, whose two elements are combined with the scalar instruction,
+    /// and then the last element of a vector of odd length.
     ///
     /// <https://docs.nvidia.com/cuda/parallel-thread-execution/#half-precision-floating-point-instructions-max>
     #[inline(always)]
     pub fn reduce_max_with<const NAN: NanHandling>(self) -> bf16 {
-        let mut acc = self.to_x2s();
-        let mut n = acc.len();
-        #[rustc_unroll(full)]
-        while n > 1 {
-            n /= 2;
-            #[rustc_unroll(full)]
-            for i in 0..n {
-                acc[i] = acc[i].pair_max_with::<NAN, { XorSignAbs::Disabled }>(acc[i + n]);
-            }
-        }
-        acc[0]
-            .lo()
-            .max_with::<NAN, { XorSignAbs::Disabled }>(acc[0].hi())
+        self.reduce_pairs(
+            |a, b| a.pair_max_with::<NAN, { XorSignAbs::Disabled }>(b),
+            |a, b| a.max_with::<NAN, { XorSignAbs::Disabled }>(b),
+        )
     }
 }
 
 #[cfg(target_feature = "sm_90")]
-impl<const N: usize> bf16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> bf16xN<N> {
     /// Computes `2^x` of each element, approximately (`ex2.approx.ftz.bf16x2`).
     ///
     /// The maximum relative error of each element is 2^-7 (as for `ex2.approx.ftz.bf16`).
@@ -796,10 +778,7 @@ where
     }
 }
 
-impl<const N: usize> Add for bf16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Add for bf16xN<N> {
     type Output = Self;
 
     /// Computed as `fma(self, 1.0, rhs)`, which is exact in the product.
@@ -809,10 +788,7 @@ where
     }
 }
 
-impl<const N: usize> Sub for bf16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Sub for bf16xN<N> {
     type Output = Self;
 
     /// Computed as `fma(rhs, -1.0, self)`, which is exact in the product.
@@ -822,10 +798,7 @@ where
     }
 }
 
-impl<const N: usize> Mul for bf16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Mul for bf16xN<N> {
     type Output = Self;
 
     /// Computed as `fma(self, rhs, -0.0)`; the negative-zero addend preserves the sign of zero
@@ -836,10 +809,7 @@ where
     }
 }
 
-impl<const N: usize> Neg for bf16xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> Neg for bf16xN<N> {
     type Output = Self;
 
     #[inline(always)]

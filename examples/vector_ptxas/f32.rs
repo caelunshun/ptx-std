@@ -5,8 +5,8 @@
 //! scalar ones). Also the operators, constants and inherent methods of `f32xN<N>`.
 
 use ptx_std::{
-    Bits, Denormals, F32Ext, Half, NanHandling, Overflow, Relu, Rounding, Saturation,
-    SupportedVectorLen, Vector, VectorLen, XorSignAbs, f32xN,
+    Bits, Denormals, F32Ext, Half, NanHandling, Overflow, Relu, Rounding, Saturation, Vector,
+    XorSignAbs, f32xN,
 };
 
 const RN: Rounding = Rounding::NearestEven;
@@ -146,17 +146,26 @@ macro_rules! f32_ext_kernel {
 
 container_kernels!(
     f32:
-    f32x2_container => 2,
     f32x4_container => 4,
+    f32x6_container => 6,
     f32x8_container => 8,
+    f32x12_container => 12,
     f32x16_container => 16,
     f32x32_container => 32,
     f32x64_container => 64,
 );
+container_basic_kernels!(
+    f32:
+    f32x1_container_basic => 1,
+    f32x2_container_basic => 2,
+    f32x3_container_basic => 3,
+);
 
 f32_ext_kernel!(f32_ext_scalar, f32);
 f32_ext_kernel!(f32_ext_x2, f32xN<2>);
+f32_ext_kernel!(f32_ext_x3, f32xN<3>);
 f32_ext_kernel!(f32_ext_x4, f32xN<4>);
+f32_ext_kernel!(f32_ext_x6, f32xN<6>);
 f32_ext_kernel!(f32_ext_x8, f32xN<8>);
 f32_ext_kernel!(f32_ext_x16, f32xN<16>);
 f32_ext_kernel!(f32_ext_x32, f32xN<32>);
@@ -190,7 +199,9 @@ macro_rules! f32_reduce_kernels {
 
 f32_reduce_kernels!(f32_sum_scalar, f32_reduce_scalar, f32);
 f32_reduce_kernels!(f32_sum_x2, f32_reduce_x2, f32xN<2>);
+f32_reduce_kernels!(f32_sum_x3, f32_reduce_x3, f32xN<3>);
 f32_reduce_kernels!(f32_sum_x4, f32_reduce_x4, f32xN<4>);
+f32_reduce_kernels!(f32_sum_x6, f32_reduce_x6, f32xN<6>);
 f32_reduce_kernels!(f32_sum_x8, f32_reduce_x8, f32xN<8>);
 f32_reduce_kernels!(f32_sum_x16, f32_reduce_x16, f32xN<16>);
 f32_reduce_kernels!(f32_sum_x32, f32_reduce_x32, f32xN<32>);
@@ -199,10 +210,7 @@ f32_reduce_kernels!(f32_sum_x64, f32_reduce_x64, f32xN<64>);
 /// The operators (with vector and broadcast scalar operands), the splatted constants, the inherent
 /// methods and the `core::simd` conversions of `f32xN<N>`.
 #[inline(always)]
-fn vector_api<const N: usize>(a: f32xN<N>, b: f32xN<N>, c: f32xN<N>, s: f32) -> [f32xN<N>; 24]
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+fn vector_api<const N: usize>(a: f32xN<N>, b: f32xN<N>, c: f32xN<N>, s: f32) -> [f32xN<N>; 24] {
     let mut acc = a;
     acc += b;
     acc -= s;
@@ -252,4 +260,10 @@ macro_rules! vector_api_kernels {
     )*};
 }
 
-vector_api_kernels!(f32_api_x2 => 2, f32_api_x8 => 8, f32_api_x64 => 64);
+vector_api_kernels!(
+    f32_api_x2 => 2,
+    f32_api_x3 => 3,
+    f32_api_x6 => 6,
+    f32_api_x8 => 8,
+    f32_api_x64 => 64,
+);

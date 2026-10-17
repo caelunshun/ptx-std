@@ -4,28 +4,42 @@
 //! `bf16_fns`), which the kernels instantiate once per width.
 
 use ptx_std::{
-    Bits, Denormals, Half, NanHandling, Overflow, Relu, Rounding, Saturation, SupportedVectorLen,
-    Vector, VectorLen, XorSignAbs, bf16, f16, f32xN,
+    Bits, Denormals, Half, NanHandling, Overflow, Relu, Rounding, Saturation, Vector, XorSignAbs,
+    bf16, f16, f32xN,
 };
 
 #[cfg(any(target_feature = "sm_100a", target_feature = "sm_103a"))]
-use ptx_std::Pairs;
+use ptx_std::{Pairs, SupportedVectorLen, VectorLen};
 
 container_kernels!(
     f16:
-    f16x2_container => 2,
     f16x4_container => 4,
+    f16x6_container => 6,
     f16x8_container => 8,
+    f16x12_container => 12,
     f16x16_container => 16,
     f16x32_container => 32,
 );
+container_basic_kernels!(
+    f16:
+    f16x1_container_basic => 1,
+    f16x2_container_basic => 2,
+    f16x3_container_basic => 3,
+);
 container_kernels!(
     bf16:
-    bf16x2_container => 2,
     bf16x4_container => 4,
+    bf16x6_container => 6,
     bf16x8_container => 8,
+    bf16x12_container => 12,
     bf16x16_container => 16,
     bf16x32_container => 32,
+);
+container_basic_kernels!(
+    bf16:
+    bf16x1_container_basic => 1,
+    bf16x2_container_basic => 2,
+    bf16x3_container_basic => 3,
 );
 
 /// Defines what `f16` and `bf16` vectors share, generic over the length: `from_f32`,
@@ -38,8 +52,6 @@ macro_rules! half_shared {
             x: f32xN<N>,
             v: Vector<$elem, N>,
         ) -> ([Vector<$elem, N>; 5], f32xN<N>)
-        where
-            VectorLen<N>: SupportedVectorLen,
         {
             (
                 [
@@ -95,8 +107,6 @@ macro_rules! half_shared {
             v: Vector<$elem, N>,
             s: $elem,
         ) -> ([Vector<$elem, N>; 7], f32xN<N>)
-        where
-            VectorLen<N>: SupportedVectorLen,
         {
             let mut acc = v;
             acc += s;
@@ -110,8 +120,6 @@ macro_rules! half_shared {
 
         #[inline(always)]
         pub fn sum<const N: usize>(a: Vector<$elem, N>) -> f32
-        where
-            VectorLen<N>: SupportedVectorLen,
         {
             a.reduce_sum()
         }
@@ -169,10 +177,7 @@ mod f16_fns {
     half_shared!(f16);
 
     #[inline(always)]
-    pub fn arith<const N: usize>(a: Vector<f16, N>, b: Vector<f16, N>) -> [Vector<f16, N>; 14]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn arith<const N: usize>(a: Vector<f16, N>, b: Vector<f16, N>) -> [Vector<f16, N>; 14] {
         let mut acc = a;
         acc += b;
         acc -= b;
@@ -200,10 +205,7 @@ mod f16_fns {
         a: Vector<f16, N>,
         b: Vector<f16, N>,
         c: Vector<f16, N>,
-    ) -> [Vector<f16, N>; 6]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    ) -> [Vector<f16, N>; 6] {
         [
             a.mul_add(b, c),
             a.mul_add_with::<{ Denormals::FlushToZero }, { Saturation::None }, { Relu::Disabled }>(
@@ -230,10 +232,7 @@ mod f16_fns {
         a: Vector<f16, N>,
         b: Vector<f16, N>,
         c: Vector<f16, N>,
-    ) -> [Vector<f16, N>; 2]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    ) -> [Vector<f16, N>; 2] {
         [
             a.mul_add_oob::<{ Relu::Disabled }>(b, c),
             a.mul_add_oob::<{ Relu::Enabled }>(b, c),
@@ -241,10 +240,7 @@ mod f16_fns {
     }
 
     #[inline(always)]
-    pub fn unary<const N: usize>(a: Vector<f16, N>) -> [Vector<f16, N>; 5]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn unary<const N: usize>(a: Vector<f16, N>) -> [Vector<f16, N>; 5] {
         [
             a.abs(),
             a.abs_with::<{ Denormals::FlushToZero }>(),
@@ -255,10 +251,7 @@ mod f16_fns {
     }
 
     #[inline(always)]
-    pub fn minmax<const N: usize>(a: Vector<f16, N>, b: Vector<f16, N>) -> [Vector<f16, N>; 8]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn minmax<const N: usize>(a: Vector<f16, N>, b: Vector<f16, N>) -> [Vector<f16, N>; 8] {
         [
             a.min(b),
             a.max(b),
@@ -285,10 +278,7 @@ mod f16_fns {
 
     #[cfg(target_feature = "sm_86")]
     #[inline(always)]
-    pub fn xorsign<const N: usize>(a: Vector<f16, N>, b: Vector<f16, N>) -> [Vector<f16, N>; 4]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn xorsign<const N: usize>(a: Vector<f16, N>, b: Vector<f16, N>) -> [Vector<f16, N>; 4] {
         [
             a.min_with::<{ Denormals::Preserve }, { NanHandling::Ignore }, { XorSignAbs::Enabled }>(
                 b,
@@ -306,10 +296,7 @@ mod f16_fns {
     }
 
     #[inline(always)]
-    pub fn reduce<const N: usize>(a: Vector<f16, N>) -> [f16; 8]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn reduce<const N: usize>(a: Vector<f16, N>) -> [f16; 8] {
         [
             a.reduce_min(),
             a.reduce_max(),
@@ -401,10 +388,7 @@ mod bf16_fns {
     half_shared!(bf16);
 
     #[inline(always)]
-    pub fn arith<const N: usize>(a: Vector<bf16, N>, b: Vector<bf16, N>) -> [Vector<bf16, N>; 5]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn arith<const N: usize>(a: Vector<bf16, N>, b: Vector<bf16, N>) -> [Vector<bf16, N>; 5] {
         let mut acc = a;
         acc += b;
         acc -= b;
@@ -417,10 +401,7 @@ mod bf16_fns {
         a: Vector<bf16, N>,
         b: Vector<bf16, N>,
         c: Vector<bf16, N>,
-    ) -> [Vector<bf16, N>; 3]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    ) -> [Vector<bf16, N>; 3] {
         [
             a.mul_add(b, c),
             a.mul_add_with::<{ Relu::Enabled }>(b, c),
@@ -430,18 +411,12 @@ mod bf16_fns {
 
     #[cfg(target_feature = "sm_90")]
     #[inline(always)]
-    pub fn sm90<const N: usize>(a: Vector<bf16, N>) -> [Vector<bf16, N>; 2]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn sm90<const N: usize>(a: Vector<bf16, N>) -> [Vector<bf16, N>; 2] {
         [a.exp2_approx(), a.tanh_approx()]
     }
 
     #[inline(always)]
-    pub fn minmax<const N: usize>(a: Vector<bf16, N>, b: Vector<bf16, N>) -> [Vector<bf16, N>; 4]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn minmax<const N: usize>(a: Vector<bf16, N>, b: Vector<bf16, N>) -> [Vector<bf16, N>; 4] {
         [
             a.min(b),
             a.max(b),
@@ -452,10 +427,7 @@ mod bf16_fns {
 
     #[cfg(target_feature = "sm_86")]
     #[inline(always)]
-    pub fn xorsign<const N: usize>(a: Vector<bf16, N>, b: Vector<bf16, N>) -> [Vector<bf16, N>; 4]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn xorsign<const N: usize>(a: Vector<bf16, N>, b: Vector<bf16, N>) -> [Vector<bf16, N>; 4] {
         [
             a.min_with::<{ NanHandling::Ignore }, { XorSignAbs::Enabled }>(b),
             a.min_with::<{ NanHandling::Propagate }, { XorSignAbs::Enabled }>(b),
@@ -465,10 +437,7 @@ mod bf16_fns {
     }
 
     #[inline(always)]
-    pub fn reduce<const N: usize>(a: Vector<bf16, N>) -> [bf16; 6]
-    where
-        VectorLen<N>: SupportedVectorLen,
-    {
+    pub fn reduce<const N: usize>(a: Vector<bf16, N>) -> [bf16; 6] {
         [
             a.reduce_min(),
             a.reduce_max(),
@@ -555,6 +524,24 @@ pub unsafe extern "ptx-kernel" fn bf16_tanh(a: *const bf16, out: *mut bf16) {
 }
 
 half_kernels!(
+    f16, f16_fns, 1,
+    convert: f16x1_convert,
+    stochastic: f16x1_stochastic,
+    broadcast: f16x1_broadcast,
+    sum: f16x1_sum,
+);
+f16_kernels!(
+    1,
+    f16x1_arith,
+    f16x1_fma,
+    f16x1_oob,
+    f16x1_unary,
+    f16x1_minmax,
+    f16x1_xorsign,
+    f16x1_reduce,
+);
+
+half_kernels!(
     f16, f16_fns, 2,
     convert: f16x2_convert,
     stochastic: f16x2_stochastic,
@@ -570,6 +557,24 @@ f16_kernels!(
     f16x2_minmax,
     f16x2_xorsign,
     f16x2_reduce,
+);
+
+half_kernels!(
+    f16, f16_fns, 3,
+    convert: f16x3_convert,
+    stochastic: f16x3_stochastic,
+    broadcast: f16x3_broadcast,
+    sum: f16x3_sum,
+);
+f16_kernels!(
+    3,
+    f16x3_arith,
+    f16x3_fma,
+    f16x3_oob,
+    f16x3_unary,
+    f16x3_minmax,
+    f16x3_xorsign,
+    f16x3_reduce,
 );
 
 half_kernels!(
@@ -591,6 +596,24 @@ f16_kernels!(
 );
 
 half_kernels!(
+    f16, f16_fns, 6,
+    convert: f16x6_convert,
+    stochastic: f16x6_stochastic,
+    broadcast: f16x6_broadcast,
+    sum: f16x6_sum,
+);
+f16_kernels!(
+    6,
+    f16x6_arith,
+    f16x6_fma,
+    f16x6_oob,
+    f16x6_unary,
+    f16x6_minmax,
+    f16x6_xorsign,
+    f16x6_reduce,
+);
+
+half_kernels!(
     f16, f16_fns, 8,
     convert: f16x8_convert,
     stochastic: f16x8_stochastic,
@@ -606,6 +629,24 @@ f16_kernels!(
     f16x8_minmax,
     f16x8_xorsign,
     f16x8_reduce,
+);
+
+half_kernels!(
+    f16, f16_fns, 12,
+    convert: f16x12_convert,
+    stochastic: f16x12_stochastic,
+    broadcast: f16x12_broadcast,
+    sum: f16x12_sum,
+);
+f16_kernels!(
+    12,
+    f16x12_arith,
+    f16x12_fma,
+    f16x12_oob,
+    f16x12_unary,
+    f16x12_minmax,
+    f16x12_xorsign,
+    f16x12_reduce,
 );
 
 half_kernels!(
@@ -645,6 +686,23 @@ f16_kernels!(
 );
 
 half_kernels!(
+    bf16, bf16_fns, 1,
+    convert: bf16x1_convert,
+    stochastic: bf16x1_stochastic,
+    broadcast: bf16x1_broadcast,
+    sum: bf16x1_sum,
+);
+bf16_kernels!(
+    1,
+    bf16x1_arith,
+    bf16x1_fma,
+    bf16x1_sm90,
+    bf16x1_minmax,
+    bf16x1_xorsign,
+    bf16x1_reduce,
+);
+
+half_kernels!(
     bf16, bf16_fns, 2,
     convert: bf16x2_convert,
     stochastic: bf16x2_stochastic,
@@ -659,6 +717,23 @@ bf16_kernels!(
     bf16x2_minmax,
     bf16x2_xorsign,
     bf16x2_reduce,
+);
+
+half_kernels!(
+    bf16, bf16_fns, 3,
+    convert: bf16x3_convert,
+    stochastic: bf16x3_stochastic,
+    broadcast: bf16x3_broadcast,
+    sum: bf16x3_sum,
+);
+bf16_kernels!(
+    3,
+    bf16x3_arith,
+    bf16x3_fma,
+    bf16x3_sm90,
+    bf16x3_minmax,
+    bf16x3_xorsign,
+    bf16x3_reduce,
 );
 
 half_kernels!(
@@ -679,6 +754,23 @@ bf16_kernels!(
 );
 
 half_kernels!(
+    bf16, bf16_fns, 6,
+    convert: bf16x6_convert,
+    stochastic: bf16x6_stochastic,
+    broadcast: bf16x6_broadcast,
+    sum: bf16x6_sum,
+);
+bf16_kernels!(
+    6,
+    bf16x6_arith,
+    bf16x6_fma,
+    bf16x6_sm90,
+    bf16x6_minmax,
+    bf16x6_xorsign,
+    bf16x6_reduce,
+);
+
+half_kernels!(
     bf16, bf16_fns, 8,
     convert: bf16x8_convert,
     stochastic: bf16x8_stochastic,
@@ -693,6 +785,23 @@ bf16_kernels!(
     bf16x8_minmax,
     bf16x8_xorsign,
     bf16x8_reduce,
+);
+
+half_kernels!(
+    bf16, bf16_fns, 12,
+    convert: bf16x12_convert,
+    stochastic: bf16x12_stochastic,
+    broadcast: bf16x12_broadcast,
+    sum: bf16x12_sum,
+);
+bf16_kernels!(
+    12,
+    bf16x12_arith,
+    bf16x12_fma,
+    bf16x12_sm90,
+    bf16x12_minmax,
+    bf16x12_xorsign,
+    bf16x12_reduce,
 );
 
 half_kernels!(

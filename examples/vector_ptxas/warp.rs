@@ -6,7 +6,8 @@
 
 use core::simd::Simd;
 use ptx_std::{
-    bf16x8, f4e2m1, f4e2m1x2, f4e2m1x32, f8e4m3x2, f16, f16x2, f16x16, f16x32, f32x8, lane_id,
+    bf16x8, f4e2m1, f4e2m1x2, f4e2m1x32, f8e4m3x2, f16, f16x2, f16x16, f16x32, f16xN, f32x8, f32xN,
+    lane_id,
     warp_collectives::{
         LaneMask, ReduxOp, ShuffleMode, match_all, match_any, reduce, shuffle, shuffle_down,
         shuffle_segmented, shuffle_up, shuffle_xor, try_shuffle_down,
@@ -56,6 +57,8 @@ exchange_kernel!(warp_f4e2m1x32, f4e2m1x32);
 exchange_kernel!(warp_f16x32, f16x32);
 exchange_kernel!(warp_f32_array3, [f32; 3]);
 exchange_kernel!(warp_f32x8, f32x8);
+exchange_kernel!(warp_f16x3, f16xN<3>);
+exchange_kernel!(warp_f32x6, f32xN<6>);
 
 /// Instantiates every integer `redux.sync` operation on `$ty`.
 macro_rules! redux_kernel {
@@ -86,7 +89,7 @@ redux_kernel!(redux_u32x32, Simd<u32, 32>);
 #[cfg(target_feature = "sm_100f")]
 mod float {
     use ptx_std::{
-        NanHandling, f32x4, lane_id,
+        NanHandling, f32x4, f32xN, lane_id,
         warp_collectives::{Absolute, LaneMask, ReduxOp, reduce_f32},
     };
 
@@ -130,4 +133,5 @@ mod float {
 
     redux_f32_kernel!(redux_f32, f32);
     redux_f32_kernel!(redux_f32x4, f32x4);
+    redux_f32_kernel!(redux_f32x6, f32xN<6>);
 }

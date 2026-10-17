@@ -1,6 +1,6 @@
 // --- LLM-generated --- //
 //! 8-bit floating-point formats: FP8 (`e4m3`, `e5m2`) and the `ue8m0` scale format, as scalars and
-//! packed vectors of 2, 4, 8, 16, 32 and 64 elements.
+//! packed vectors of any length from 1 to 64.
 //!
 //! In all packed types, element 0 occupies the least significant bits.
 
@@ -42,7 +42,7 @@ narrow_scalar! {
 }
 
 vector_element! {
-    elem: f8e4m3, pair: u16, packing: Bytes,
+    elem: f8e4m3, unit: u8, packing: Bytes,
     consts: [ZERO, NEG_ZERO, ONE, NEG_ONE, NAN, MAX, MIN, MIN_POSITIVE, MIN_POSITIVE_SUBNORMAL],
     note: "See [`f8e4m3`](crate::f8e4m3) for the format.",
     aliases: f8e4m3xN, f8e4m3x2, f8e4m3x4, f8e4m3x8, f8e4m3x16, f8e4m3x32, f8e4m3x64,
@@ -104,7 +104,7 @@ narrow_scalar! {
 }
 
 vector_element! {
-    elem: f8e5m2, pair: u16, packing: Bytes,
+    elem: f8e5m2, unit: u8, packing: Bytes,
     consts: [
         ZERO, NEG_ZERO, ONE, NEG_ONE, INFINITY, NEG_INFINITY, NAN, MAX, MIN, MIN_POSITIVE,
         MIN_POSITIVE_SUBNORMAL
@@ -163,7 +163,7 @@ narrow_scalar! {
 }
 
 vector_element! {
-    elem: f8e8m0, pair: u16, packing: Bytes,
+    elem: f8e8m0, unit: u8, packing: Bytes,
     consts: [ONE, NAN, MAX, MIN],
     note: "See [`f8e8m0`](crate::f8e8m0) for the format.",
     aliases: f8e8m0xN, f8e8m0x2, f8e8m0x4, f8e8m0x8, f8e8m0x16, f8e8m0x32, f8e8m0x64,

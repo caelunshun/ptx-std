@@ -16,7 +16,7 @@
 
 use crate::data_types::array_from_fn;
 #[cfg(target_feature = "sm_100f")]
-use crate::{SupportedVectorLen, VectorLen, f32xN, modifiers::NanHandling};
+use crate::{f32xN, modifiers::NanHandling};
 use bytemuck::{Pod, Zeroable};
 use core::{
     arch::nvptx as nv,
@@ -701,7 +701,7 @@ pub enum Absolute {
 }
 
 mod sealed {
-    use crate::{SupportedVectorLen, VectorLen, f32xN};
+    use crate::f32xN;
     use core::simd::Simd;
 
     pub trait Sealed {}
@@ -710,7 +710,7 @@ mod sealed {
     impl Sealed for f32 {}
     impl<const N: usize> Sealed for Simd<u32, N> {}
     impl<const N: usize> Sealed for Simd<i32, N> {}
-    impl<const N: usize> Sealed for f32xN<N> where VectorLen<N>: SupportedVectorLen {}
+    impl<const N: usize> Sealed for f32xN<N> {}
 }
 
 /// Integer types that can be reduced across a warp with [`reduce`]: `u32`, `i32`, and `Simd`
@@ -829,10 +829,7 @@ impl ReduxF32 for f32 {
 }
 
 #[cfg(target_feature = "sm_100f")]
-impl<const N: usize> ReduxF32 for f32xN<N>
-where
-    VectorLen<N>: SupportedVectorLen,
-{
+impl<const N: usize> ReduxF32 for f32xN<N> {
     #[inline(always)]
     unsafe fn reduce<const OP: ReduxOp, const ABS: Absolute, const NAN: NanHandling>(
         mask: LaneMask,
